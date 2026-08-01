@@ -22,6 +22,20 @@ if git ls-files --error-unmatch .env >/dev/null 2>&1; then
   exit 1
 fi
 
+# CI fails an untidy module, so the local gate has to check it too — otherwise
+# the first time anyone finds out is a red build on a tree that passed
+# everything locally. Adding a package can pull a new indirect dependency into
+# go.sum, which is exactly how this was missed once already.
+echo "== go.mod and go.sum are tidy"
+go mod tidy
+if ! git diff --quiet -- go.mod go.sum; then
+  echo "go mod tidy changed go.mod or go.sum:" >&2
+  git diff -- go.mod go.sum >&2
+  echo "the tidied files are now in the working tree; review and re-run" >&2
+  exit 1
+fi
+echo "tidy"
+
 ./scripts/1.lint.sh
 ./scripts/4.coverage-gate.sh
 
