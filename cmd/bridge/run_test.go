@@ -8,11 +8,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 
+	"github.com/pigfox/eth-bridge-go/internal/bridge"
 	"github.com/pigfox/eth-bridge-go/internal/chain"
 	"github.com/pigfox/eth-bridge-go/internal/chain/fake"
 	"github.com/pigfox/eth-bridge-go/internal/config"
+	"github.com/pigfox/eth-bridge-go/internal/opstack"
 	"github.com/pigfox/eth-bridge-go/internal/route"
 )
 
@@ -138,7 +141,7 @@ func TestSendSuccess(t *testing.T) {
 	if dialled != "https://base-sepolia.example" {
 		t.Errorf("dialled %q, want the configured L2 endpoint", dialled)
 	}
-	for _, want := range []string{"route:  same-chain", "1000000000000000 wei", "tx:     0x", "https://sepolia.basescan.org/tx/0x"} {
+	for _, want := range []string{"route:  same-chain", "1000000000000000 wei", "src tx: 0x", "https://sepolia.basescan.org/tx/0x"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout %q does not contain %q", stdout, want)
 		}
@@ -213,29 +216,20 @@ func TestSendRuntimeErrorExitsOne(t *testing.T) {
 	}
 }
 
-// Bridged routes are resolved but not implemented in this version. The CLI must
-// say so rather than pretend.
-func TestDispatchUnimplementedRoutes(t *testing.T) {
+// Withdrawal is resolved but not implemented in this version. The CLI must say
+// so rather than pretend.
+func TestDispatchWithdrawalIsNotImplemented(t *testing.T) {
 	withDial(t, func(context.Context, string) (chain.Client, error) {
 		t.Error("dialled a node for an unimplemented route")
 		return nil, errBoom
 	})
 
-	tests := []struct {
-		name     string
-		src, dst uint64
-	}{
-		{"deposit", config.ChainIDEthSepolia, config.ChainIDBaseSepolia},
-		{"withdraw initiate", config.ChainIDBaseSepolia, config.ChainIDEthSepolia},
+	cfg := config.Config{
+		SourceChainID: config.ChainIDBaseSepolia,
+		DestChainID:   config.ChainIDEthSepolia,
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := config.Config{SourceChainID: tc.src, DestChainID: tc.dst}
-			_, err := dispatch(context.Background(), cfg, big.NewInt(1))
-			if !errors.Is(err, route.ErrNotImplemented) {
-				t.Fatalf("error = %v, want route.ErrNotImplemented", err)
-			}
-		})
+	if _, err := dispatch(context.Background(), cfg, big.NewInt(1)); !errors.Is(err, route.ErrNotImplemented) {
+		t.Fatalf("error = %v, want route.ErrNotImplemented", err)
 	}
 }
 
@@ -320,5 +314,161 @@ func TestTestAddrMatchesTestPK(t *testing.T) {
 	withEnv(t, baseEnv())
 	if _, err := config.Load(getenv); err != nil {
 		t.Fatalf("the test fixture is inconsistent: %v", err)
+	}
+}
+
+// depositEnv is a valid Eth Sepolia -> Base Sepolia environment.
+func depositEnv() map[string]string {
+	m := baseEnv()
+	m[config.EnvSourceChainID] = "11155111"
+	m[config.EnvL1RPCURL] = "https://eth-sepolia.example"
+	return m
+}
+
+// depositL1Client is a fake scripted for one successful L1 deposit, including
+// the TransactionDeposited log the L2 hash is derived from.
+func depositL1Client(amount *big.Int) *fake.Client {
+	opaque := make([]byte, 0, 73)
+	opaque = append(opaque, common.LeftPadBytes(amount.Bytes(), 32)...)
+	opaque = append(opaque, common.LeftPadBytes(amount.Bytes(), 32)...)
+	opaque = append(opaque, common.LeftPadBytes(big.NewInt(200000).Bytes(), 8)...)
+	opaque = append(opaque, 0)
+
+	data := append(common.LeftPadBytes(big.NewInt(32).Bytes(), 32),
+		common.LeftPadBytes(big.NewInt(int64(len(opaque))).Bytes(), 32)...)
+	data = append(data, opaque...)
+	data = append(data, make([]byte, (32-len(opaque)%32)%32)...)
+
+	c := &fake.Client{}
+	c.PushChainID(big.NewInt(11155111), nil)
+	c.PushNonce(1, nil)
+	c.PushTipCap(big.NewInt(1_000_000), nil)
+	c.PushHeader(&types.Header{BaseFee: big.NewInt(1_000_000)}, nil)
+	c.PushGas(120_000, nil)
+	c.PushSend(nil)
+	c.PushReceipt(&types.Receipt{
+		Status:      types.ReceiptStatusSuccessful,
+		BlockNumber: big.NewInt(1),
+		Logs: []*types.Log{{
+			Topics: []common.Hash{
+				opstack.TransactionDepositedTopic,
+				common.HexToHash("0xaaaa"),
+				common.HexToHash("0xbbbb"),
+				common.BigToHash(big.NewInt(0)),
+			},
+			Data:      data,
+			BlockHash: common.HexToHash("0xf00d"),
+			Index:     0,
+		}},
+	}, nil)
+	return c
+}
+
+func TestSendDepositReportsBothHashesAndTheCredit(t *testing.T) {
+	withEnv(t, depositEnv())
+	amount := big.NewInt(500_000_000_000_000) // 0.0005 ETH
+
+	l1 := depositL1Client(amount)
+	l2 := &fake.Client{}
+	l2.PushChainID(big.NewInt(84532), nil)
+	l2.PushBalance(big.NewInt(0), nil)            // before
+	l2.PushBalance(new(big.Int).Set(amount), nil) // credited
+
+	withDial(t, func(_ context.Context, rpc string) (chain.Client, error) {
+		if rpc == "https://eth-sepolia.example" {
+			return l1, nil
+		}
+		return l2, nil
+	})
+
+	code, stdout, stderr := exec("send", "--amount", "0.0005")
+	if code != exitOK {
+		t.Fatalf("exit code = %d (stderr: %s)", code, stderr)
+	}
+	for _, want := range []string{
+		"route:  deposit",
+		"500000000000000 wei",
+		"src tx: 0x",
+		"https://sepolia.etherscan.io/tx/0x",
+		"dst tx: 0x",
+		"https://sepolia.basescan.org/tx/0x",
+		"credit: 500000000000000 wei on chain 84532",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout %q does not contain %q", stdout, want)
+		}
+	}
+	if !l1.Closed() || !l2.Closed() {
+		t.Errorf("clients closed: l1=%v l2=%v", l1.Closed(), l2.Closed())
+	}
+}
+
+// A deposit that reaches L1 and then fails must still print the L1 hash, and
+// must still exit non-zero.
+func TestSendDepositReportsPartialResultOnFailure(t *testing.T) {
+	withEnv(t, depositEnv())
+
+	l1 := depositL1Client(big.NewInt(1))
+	l2 := &fake.Client{}
+	l2.PushChainID(big.NewInt(84532), nil)
+	l2.PushBalance(big.NewInt(0), nil)
+	l2.PushBalance(nil, errBoom) // the credit poll fails
+
+	withDial(t, func(_ context.Context, rpc string) (chain.Client, error) {
+		if rpc == "https://eth-sepolia.example" {
+			return l1, nil
+		}
+		return l2, nil
+	})
+
+	code, stdout, stderr := exec("send", "--amount", "0.000000000000000001")
+	if code != exitRuntime {
+		t.Fatalf("exit code = %d, want %d", code, exitRuntime)
+	}
+	if !strings.Contains(stdout, "src tx: 0x") {
+		t.Errorf("stdout %q should still report the L1 hash", stdout)
+	}
+	if !strings.Contains(stderr, "boom") {
+		t.Errorf("stderr %q should report the failure", stderr)
+	}
+}
+
+func TestDispatchDepositDialFailures(t *testing.T) {
+	cfg := config.Config{
+		SourceChainID: config.ChainIDEthSepolia,
+		DestChainID:   config.ChainIDBaseSepolia,
+		L1RPCURL:      "l1",
+		L2RPCURL:      "l2",
+	}
+
+	tests := []struct {
+		name   string
+		failOn string
+	}{
+		{"L1 dial fails", "l1"},
+		{"L2 dial fails", "l2"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			withDial(t, func(_ context.Context, rpc string) (chain.Client, error) {
+				if rpc == tc.failOn {
+					return nil, errBoom
+				}
+				return &fake.Client{}, nil
+			})
+			if _, err := dispatch(context.Background(), cfg, big.NewInt(1)); !errors.Is(err, errBoom) {
+				t.Fatalf("error = %v, want errBoom", err)
+			}
+		})
+	}
+}
+
+// report prints nothing at all when there is no transaction to report, so that
+// a pure configuration failure does not emit a half-filled block.
+func TestReportIsSilentWithoutATransaction(t *testing.T) {
+	var buf bytes.Buffer
+	report(&buf, config.Config{}, bridge.Result{})
+	if buf.Len() != 0 {
+		t.Errorf("report wrote %q, want nothing", buf.String())
 	}
 }

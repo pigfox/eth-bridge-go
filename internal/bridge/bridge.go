@@ -19,6 +19,7 @@ import (
 
 	"github.com/pigfox/eth-bridge-go/internal/chain"
 	"github.com/pigfox/eth-bridge-go/internal/config"
+	"github.com/pigfox/eth-bridge-go/internal/opstack"
 	"github.com/pigfox/eth-bridge-go/internal/route"
 )
 
@@ -37,6 +38,9 @@ var (
 	ErrReceiptTimeout = errors.New("timed out waiting for transaction receipt")
 	// ErrTxReverted means the transaction was mined with a failure status.
 	ErrTxReverted = errors.New("transaction reverted")
+	// ErrDepositNotCredited means the L1 deposit was mined but the destination
+	// balance on L2 had not moved before the confirm timeout expired.
+	ErrDepositNotCredited = errors.New("deposit not credited on the destination chain")
 )
 
 // Result describes a completed bridge operation.
@@ -47,6 +51,13 @@ type Result struct {
 	SrcTxHash common.Hash
 	// Amount is the value moved, in wei.
 	Amount *big.Int
+	// DstTxHash is the transaction hash on the destination chain. For a
+	// deposit this is derived from the L1 receipt rather than observed, since
+	// the L2 transaction is produced by the chain itself.
+	DstTxHash common.Hash
+	// Credited is the increase actually observed at the destination address,
+	// in wei. It is nil for routes that do not cross a domain.
+	Credited *big.Int
 }
 
 // Signer signs a transaction on behalf of the source account.
@@ -63,6 +74,13 @@ func LocalSigner(key *ecdsa.PrivateKey) Signer {
 		return types.SignTx(tx, types.LatestSignerForChainID(chainID), key)
 	}
 }
+
+// DepositEncoder builds the calldata for a bridge deposit.
+//
+// Like Signer, this is a plug point: a different OP Stack chain, or a future
+// version of the standard bridge with a different deposit signature, is a
+// different encoder rather than a change to the transaction-building code.
+type DepositEncoder func(to common.Address, minGasLimit uint32) ([]byte, error)
 
 // Option customises a Bridger.
 type Option func(*Bridger)
@@ -82,6 +100,26 @@ func WithPollInterval(d time.Duration) Option {
 	return func(b *Bridger) { b.pollInterval = d }
 }
 
+// WithGasMarginPercent overrides the margin added to every gas estimate.
+func WithGasMarginPercent(pct uint64) Option {
+	return func(b *Bridger) { b.gasMarginPercent = pct }
+}
+
+// WithDepositEncoder replaces the standard-bridge deposit encoder.
+func WithDepositEncoder(e DepositEncoder) Option {
+	return func(b *Bridger) { b.encodeDeposit = e }
+}
+
+// WithL1StandardBridge overrides the L1 Standard Bridge address.
+func WithL1StandardBridge(addr common.Address) Option {
+	return func(b *Bridger) { b.l1Bridge = addr }
+}
+
+// WithDepositMinGasLimit overrides the gas made available to the deposit on L2.
+func WithDepositMinGasLimit(g uint32) Option {
+	return func(b *Bridger) { b.depositMinGasLimit = g }
+}
+
 // WithSleeper overrides the wait between polls. Tests use it to run the
 // confirmation loops without spending real time in them.
 func WithSleeper(s func(context.Context, time.Duration) error) Option {
@@ -98,6 +136,11 @@ type Bridger struct {
 	pollInterval   time.Duration
 	sleep          func(context.Context, time.Duration) error
 	sign           Signer
+
+	l1Bridge           common.Address
+	depositMinGasLimit uint32
+	encodeDeposit      DepositEncoder
+	gasMarginPercent   uint64
 }
 
 // New builds a Bridger over the given source and destination clients.
@@ -112,6 +155,11 @@ func New(cfg config.Config, src, dst chain.Client, opts ...Option) *Bridger {
 		pollInterval:   config.DefaultPollInterval,
 		sleep:          Sleep,
 		sign:           LocalSigner(cfg.SourceKey()),
+
+		l1Bridge:           common.HexToAddress(config.L1StandardBridgeSepolia),
+		depositMinGasLimit: config.DefaultDepositMinGasLimit,
+		encodeDeposit:      opstack.DepositETHToCalldata,
+		gasMarginPercent:   config.DefaultGasMarginPercent,
 	}
 	for _, opt := range opts {
 		opt(b)
@@ -203,6 +251,7 @@ func (b *Bridger) signedTransfer(ctx context.Context, to common.Address, value *
 	if err != nil {
 		return nil, fmt.Errorf("estimate gas: %w", err)
 	}
+	gas += gas * b.gasMarginPercent / 100
 
 	chainID := new(big.Int).SetUint64(b.cfg.SourceChainID)
 	tx := types.NewTx(&types.DynamicFeeTx{
@@ -249,10 +298,88 @@ func (b *Bridger) WaitReceipt(ctx context.Context, c chain.Client, hash common.H
 	}
 }
 
-// Deposit performs an L1 to L2 deposit. It is recognised by the router but not
-// implemented in this version; see the roadmap in the README.
-func (b *Bridger) Deposit(context.Context, *big.Int) (Result, error) {
-	return Result{}, fmt.Errorf("%w: %s", route.ErrNotImplemented, route.KindDeposit)
+// Deposit moves ETH from L1 to L2 through the Base Standard Bridge.
+//
+// It calls L1StandardBridge.depositETHTo with the amount as the transaction
+// value, waits for the L1 receipt, derives the hash of the L2 transaction the
+// deposit will produce, and then waits for the destination balance on L2 to
+// actually move. The balance check is the one that matters: a successful L1
+// receipt only means the deposit was accepted for relay, not that the ETH has
+// arrived.
+func (b *Bridger) Deposit(ctx context.Context, amount *big.Int) (Result, error) {
+	if amount == nil || amount.Sign() <= 0 {
+		return Result{}, ErrAmountNotPositive
+	}
+	if err := b.verifyChain(ctx, b.src, b.cfg.SourceChainID); err != nil {
+		return Result{}, err
+	}
+	if err := b.verifyChain(ctx, b.dst, b.cfg.DestChainID); err != nil {
+		return Result{}, err
+	}
+
+	// Read the destination balance before anything is sent, so the credit is
+	// measured as a delta rather than guessed at from an absolute value.
+	before, err := b.dst.BalanceAt(ctx, b.cfg.DestAddr, nil)
+	if err != nil {
+		return Result{}, fmt.Errorf("read destination balance: %w", err)
+	}
+
+	data, err := b.encodeDeposit(b.cfg.DestAddr, b.depositMinGasLimit)
+	if err != nil {
+		return Result{}, fmt.Errorf("encode deposit calldata: %w", err)
+	}
+
+	tx, err := b.signedTransfer(ctx, b.l1Bridge, amount, data)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := b.src.SendTransaction(ctx, tx); err != nil {
+		return Result{}, fmt.Errorf("broadcast deposit: %w", err)
+	}
+
+	res := Result{Kind: route.KindDeposit, SrcTxHash: tx.Hash(), Amount: new(big.Int).Set(amount)}
+
+	rcpt, err := b.WaitReceipt(ctx, b.src, tx.Hash())
+	if err != nil {
+		return res, err
+	}
+
+	// From here on the L1 side has succeeded, so failures are returned
+	// alongside the partial result: the caller needs the L1 hash to be able to
+	// go and look at what happened.
+	if res.DstTxHash, err = opstack.L2TxHash(rcpt); err != nil {
+		return res, fmt.Errorf("derive L2 transaction from deposit receipt: %w", err)
+	}
+
+	credited, err := b.waitForCredit(ctx, before)
+	if err != nil {
+		return res, err
+	}
+	res.Credited = credited
+	return res, nil
+}
+
+// waitForCredit polls the destination balance until it rises above before, and
+// returns the increase.
+func (b *Bridger) waitForCredit(ctx context.Context, before *big.Int) (*big.Int, error) {
+	deadline := time.Now().Add(b.confirmTimeout)
+	for {
+		now, err := b.dst.BalanceAt(ctx, b.cfg.DestAddr, nil)
+		if err != nil {
+			return nil, fmt.Errorf("read destination balance: %w", err)
+		}
+		if now.Cmp(before) > 0 {
+			return new(big.Int).Sub(now, before), nil
+		}
+
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("%w: %s still holds %s wei after %s",
+				ErrDepositNotCredited, b.cfg.DestAddr.Hex(), now, b.confirmTimeout)
+		}
+		if err := b.sleep(ctx, b.pollInterval); err != nil {
+			return nil, fmt.Errorf("waiting for deposit credit: %w", err)
+		}
+	}
 }
 
 // WithdrawInitiate starts an L2 to L1 withdrawal. It is recognised by the

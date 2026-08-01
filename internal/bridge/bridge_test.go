@@ -114,8 +114,9 @@ func TestSameChainHappyPath(t *testing.T) {
 	if tx.Value().Cmp(amount) != 0 {
 		t.Errorf("value = %s, want %s", tx.Value(), amount)
 	}
-	if tx.Gas() != 21000 {
-		t.Errorf("gas = %d, want 21000", tx.Gas())
+	// 21000 estimated, plus the default 30% margin.
+	if want := 21000 + 21000*config.DefaultGasMarginPercent/100; tx.Gas() != want {
+		t.Errorf("gas = %d, want %d (estimate plus margin)", tx.Gas(), want)
 	}
 	// Fee cap leaves room for the base fee to double: tip + 2*baseFee.
 	wantFeeCap := big.NewInt(1_000_000 + 2*7_000_000)
@@ -447,34 +448,21 @@ func TestLocalSignerProducesARecoverableSignature(t *testing.T) {
 	}
 }
 
-// The two bridged routes are recognised by the router but do not ship in this
-// version. They must say so rather than do something surprising.
-func TestUnimplementedRoutes(t *testing.T) {
+// Withdrawal is recognised by the router but does not ship in this version. It
+// must say so rather than do something surprising.
+func TestWithdrawInitiateIsNotImplemented(t *testing.T) {
 	c := &fake.Client{}
 	b := New(testCfg(t), c, c)
-	ctx := context.Background()
 
-	tests := []struct {
-		name string
-		call func() (Result, error)
-	}{
-		{"deposit", func() (Result, error) { return b.Deposit(ctx, big.NewInt(1)) }},
-		{"withdraw initiate", func() (Result, error) { return b.WithdrawInitiate(ctx, big.NewInt(1)) }},
+	res, err := b.WithdrawInitiate(context.Background(), big.NewInt(1))
+	if !errors.Is(err, route.ErrNotImplemented) {
+		t.Fatalf("error = %v, want route.ErrNotImplemented", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			res, err := tc.call()
-			if !errors.Is(err, route.ErrNotImplemented) {
-				t.Fatalf("error = %v, want route.ErrNotImplemented", err)
-			}
-			if res != (Result{}) {
-				t.Errorf("result = %+v, want the zero value", res)
-			}
-			// Nothing may have been broadcast.
-			if len(c.Sent()) != 0 {
-				t.Error("an unimplemented route broadcast a transaction")
-			}
-		})
+	if res.SrcTxHash != (common.Hash{}) || res.Amount != nil {
+		t.Errorf("result = %+v, want the zero value", res)
+	}
+	if len(c.Sent()) != 0 {
+		t.Error("an unimplemented route broadcast a transaction")
 	}
 }
 
@@ -498,5 +486,41 @@ func TestNewAppliesDefaultsAndOptions(t *testing.T) {
 	b2 := New(testCfg(t), c, c, WithConfirmTimeout(time.Second), WithPollInterval(time.Millisecond))
 	if b2.confirmTimeout != time.Second || b2.pollInterval != time.Millisecond {
 		t.Errorf("options not applied: %s / %s", b2.confirmTimeout, b2.pollInterval)
+	}
+}
+
+// The gas margin exists because eth_estimateGas is not reliable for OP Stack
+// deposits, so it must actually be applied and must be overridable.
+func TestGasMargin(t *testing.T) {
+	tests := []struct {
+		name     string
+		opts     []Option
+		estimate uint64
+		want     uint64
+	}{
+		{"default margin", nil, 100_000, 130_000},
+		{"custom margin", []Option{WithGasMarginPercent(50)}, 100_000, 150_000},
+		{"no margin", []Option{WithGasMarginPercent(0)}, 100_000, 100_000},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &fake.Client{}
+			c.PushChainID(big.NewInt(84532), nil)
+			c.PushNonce(1, nil)
+			c.PushTipCap(big.NewInt(1), nil)
+			c.PushHeader(&types.Header{BaseFee: big.NewInt(1)}, nil)
+			c.PushGas(tc.estimate, nil)
+			c.PushSend(nil)
+			c.PushReceipt(successReceipt(), nil)
+
+			opts := append(fastOpts(), tc.opts...)
+			if _, err := New(testCfg(t), c, c, opts...).SameChain(context.Background(), big.NewInt(1)); err != nil {
+				t.Fatalf("SameChain: %v", err)
+			}
+			if got := c.Sent()[0].Gas(); got != tc.want {
+				t.Errorf("gas = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

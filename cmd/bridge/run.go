@@ -10,6 +10,8 @@ import (
 	"os"
 	"regexp"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	"github.com/pigfox/eth-bridge-go/internal/bridge"
 	"github.com/pigfox/eth-bridge-go/internal/chain"
 	"github.com/pigfox/eth-bridge-go/internal/config"
@@ -17,7 +19,7 @@ import (
 )
 
 // version is the released version of this command.
-const version = "0.1.0"
+const version = "0.2.0"
 
 // Exit codes. Anything the operator can fix by retyping the command is a usage
 // error; anything that needed the network or the chain to cooperate is a
@@ -109,16 +111,33 @@ func runSend(args []string, stdout, stderr io.Writer) int {
 	}
 
 	res, err := dispatch(context.Background(), cfg, amount)
+	// A deposit that reached L1 reports its hashes even when the L2 credit did
+	// not arrive in time, because those hashes are how the operator finds out
+	// what happened.
+	report(stdout, cfg, res)
 	if err != nil {
 		fmt.Fprintf(stderr, "send: %v\n", err)
 		return exitRuntime
 	}
+	return exitOK
+}
 
+// report prints whatever of the result is populated.
+func report(stdout io.Writer, cfg config.Config, res bridge.Result) {
+	if res.SrcTxHash == (common.Hash{}) {
+		return
+	}
 	fmt.Fprintf(stdout, "route:  %s\n", res.Kind)
 	fmt.Fprintf(stdout, "amount: %s wei\n", res.Amount)
-	fmt.Fprintf(stdout, "tx:     %s\n", res.SrcTxHash.Hex())
-	fmt.Fprintf(stdout, "%s\n", explorerURL(cfg.SourceChainID, res.SrcTxHash.Hex()))
-	return exitOK
+	fmt.Fprintf(stdout, "src tx: %s\n", res.SrcTxHash.Hex())
+	fmt.Fprintf(stdout, "        %s\n", explorerURL(cfg.SourceChainID, res.SrcTxHash.Hex()))
+	if res.DstTxHash != (common.Hash{}) {
+		fmt.Fprintf(stdout, "dst tx: %s\n", res.DstTxHash.Hex())
+		fmt.Fprintf(stdout, "        %s\n", explorerURL(cfg.DestChainID, res.DstTxHash.Hex()))
+	}
+	if res.Credited != nil {
+		fmt.Fprintf(stdout, "credit: %s wei on chain %d\n", res.Credited, cfg.DestChainID)
+	}
 }
 
 // dispatch resolves the configured route and runs it.
@@ -133,9 +152,8 @@ func dispatch(ctx context.Context, cfg config.Config, amount *big.Int) (bridge.R
 		return bridge.Result{}, err
 	}
 
-	// Only the same-chain route ships in this version. Deposit and
-	// withdraw-initiate are recognised by the resolver and fall to the default
-	// arm, which says so plainly rather than half-doing them.
+	// Withdrawal is recognised by the resolver and falls to the default arm,
+	// which says so plainly rather than half-doing it.
 	switch kind {
 	case route.KindSameChain:
 		c, err := dialChain(ctx, cfg, cfg.SourceChainID)
@@ -144,6 +162,18 @@ func dispatch(ctx context.Context, cfg config.Config, amount *big.Int) (bridge.R
 		}
 		defer c.Close()
 		return bridge.New(cfg, c, c).SameChain(ctx, amount)
+	case route.KindDeposit:
+		src, err := dialChain(ctx, cfg, cfg.SourceChainID)
+		if err != nil {
+			return bridge.Result{}, err
+		}
+		defer src.Close()
+		dst, err := dialChain(ctx, cfg, cfg.DestChainID)
+		if err != nil {
+			return bridge.Result{}, err
+		}
+		defer dst.Close()
+		return bridge.New(cfg, src, dst).Deposit(ctx, amount)
 	default:
 		return bridge.Result{}, fmt.Errorf("%w: %s", route.ErrNotImplemented, kind)
 	}

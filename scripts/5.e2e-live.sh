@@ -7,7 +7,10 @@
 # and never variable values, and the tool it runs redacts the key in every
 # string it produces.
 #
-# Usage: scripts/5.e2e-live.sh
+# Any arguments are passed through to `go test`, so a single test can be run:
+#   scripts/5.e2e-live.sh -run TestT3
+#
+# Usage: scripts/5.e2e-live.sh [go test args...]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -45,4 +48,4 @@ done
 
 echo
 echo "== live E2E (this spends testnet ETH)"
-go test -tags e2e -count=1 -v -timeout 20m ./e2e/...
+go test -tags e2e -count=1 -v -timeout 40m "$@" ./e2e/...

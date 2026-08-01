@@ -69,14 +69,7 @@ func runSameChain(t *testing.T, chainID uint64, network, explorer string) {
 	ctx, cancel := context.WithTimeout(context.Background(), e2eTimeout)
 	defer cancel()
 
-	rpc, err := cfg.RPCFor(chainID)
-	if err != nil {
-		t.Fatalf("RPCFor(%d): %v", chainID, err)
-	}
-	client, err := chain.Dial(ctx, rpc)
-	if err != nil {
-		t.Fatalf("dial %s: %v", network, err)
-	}
+	client := dialOrFail(t, ctx, cfg, chainID)
 	defer client.Close()
 
 	before := balance(t, ctx, client, cfg)
