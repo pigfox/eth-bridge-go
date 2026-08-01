@@ -1,0 +1,109 @@
+name: ci
+
+# Every stage of the local gate, on every push and every pull request.
+#
+# The live E2E suite is deliberately absent. It spends real testnet ETH and
+# needs a funded private key, which is not something CI should hold; it is run
+# from a workstation with scripts/5.e2e-live.sh.
+#
+# The toolchain is pinned. An unrelated upstream release must not be able to
+# turn an unchanged tree red: when a version here moves it is because someone
+# moved it, and the commit that moved it is the commit that has to explain the
+# new failures.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.5"
+  GOLANGCI_LINT_VERSION: "v2.12.2"
+
+jobs:
+  gate:
+    name: gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      - name: go version
+        run: go version
+
+      - name: verify module dependencies
+        run: go mod verify
+
+      - name: go.mod and go.sum are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt-clean:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+          echo "gofmt clean"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: e2e tests compile
+        run: go vet -tags e2e ./e2e/...
+
+      - name: go test -race -shuffle=on
+        run: go test -race -shuffle=on -count=1 ./...
+
+      - name: coverage gate
+        run: ./scripts/4.coverage-gate.sh
+
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          args: --timeout=5m
+
+  # A single job to require in branch protection, so that adding a job above
+  # does not silently leave the branch unguarded against it.
+  ci-green:
+    name: ci-green
+    runs-on: ubuntu-24.04
+    needs: [gate, lint]
+    if: always()
+    steps:
+      - name: every job succeeded
+        run: |
+          echo "gate:  ${{ needs.gate.result }}"
+          echo "lint:  ${{ needs.lint.result }}"
+          if [ "${{ needs.gate.result }}" != "success" ] || [ "${{ needs.lint.result }}" != "success" ]; then
+            echo "at least one job did not succeed"
+            exit 1
+          fi
+          echo "all green"

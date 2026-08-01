@@ -1,0 +1,103 @@
+# golangci-lint v2 configuration.
+#
+# The rule the repository runs on is zero issues, so the enabled set is chosen
+# to be one that can actually be held at zero rather than one that looks
+# impressive and is then suppressed line by line.
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: standard
+  enable:
+    # Correctness and safety.
+    - bodyclose
+    - contextcheck
+    - durationcheck
+    - errorlint
+    - exhaustive
+    - makezero
+    - nilerr
+    - noctx
+    - rowserrcheck
+    - sqlclosecheck
+    - copyloopvar
+
+    # API hygiene. This is a library, so its exported surface is the product.
+    - godot
+    - misspell
+    - revive
+    - unconvert
+    - wastedassign
+    - whitespace
+
+    # Complexity, kept loose enough to be a signal rather than a chore.
+    - gocyclo
+    - nestif
+
+    # Security.
+    - gosec
+
+  settings:
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+
+    exhaustive:
+      default-signifies-exhaustive: true
+
+    gocyclo:
+      min-complexity: 20
+
+    nestif:
+      min-complexity: 6
+
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+        - name: package-comments
+        - name: indent-error-flow
+        - name: errorf
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: increment-decrement
+        - name: var-declaration
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - std-error-handling
+    rules:
+      # Test files may hold long table-driven functions; that is the point of
+      # them, and splitting one to satisfy a complexity metric makes it worse.
+      #
+      - path: _test\.go
+        linters:
+          - gocyclo
+          - nestif
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/pigfox/eth-bridge-go

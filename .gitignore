@@ -1,0 +1,26 @@
+# Environment and secrets. Nothing of the sort belongs in this repository, and
+# this is here so that an accident is caught rather than committed.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.yaml
+secrets.yml
+
+# Build and test output.
+/coverage.out
+/coverage.html
+*.test
+*.out
+/dist/
+/bin/
+
+# Editor and OS noise.
+.DS_Store
+.idea/
+.vscode/
+*.swp
+/withdrawals/
