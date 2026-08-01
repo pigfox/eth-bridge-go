@@ -16,16 +16,34 @@ node, no Optimism SDK, and no `abigen` step.
 | Same-chain transfer on Base Sepolia (`84532` → `84532`) | **implemented** |
 | Same-chain transfer on Eth Sepolia (`11155111` → `11155111`) | **implemented** |
 | **L1 → L2 deposit** (`11155111` → `84532`) | **implemented** — via the Base Standard Bridge |
-| L2 → L1 withdrawal (`84532` → `11155111`) | recognised, **not implemented** — see roadmap |
+| **L2 → L1 withdrawal** (`84532` → `11155111`) | **initiate only** — see the warning below |
 
-Withdrawal is resolved by `internal/route` and then fails with
-`route.ErrNotImplemented`. It is named rather than silently missing so that
-`bridge send` tells you what it will not do instead of doing something
-surprising.
+### The withdrawal is only started, not finished
 
-**What this does not do:** it does not withdraw. Moving ETH from Base Sepolia
-back to Ethereum Sepolia is not in this release, and the roadmap below explains
-why it will not ship as a half-measure.
+`bridge send` on the withdrawal route sends the **first of three** transactions.
+It does not move ETH to L1, and this tool performs neither of the other two:
+
+1. **initiate** — `L2StandardBridge.withdrawTo` on L2. This is what ships.
+2. **prove** — on L1, once an output root covering the L2 block is published.
+   **Not provided.**
+3. **finalize** — on L1, after the fault-proof window, roughly **7 days** on
+   Base Sepolia. **Not provided.**
+
+Prove and finalize need a machine, a funded L1 account and the saved parameters
+*a week later*. Shipping a command that initiates a withdrawal and leaves the
+operator to work the rest out is not a bridge; it is half of one with a homework
+assignment attached. So the tool says exactly that, in the output, every time.
+
+What it does do is capture everything proving will need — nonce, sender, target,
+value, gas limit, data, withdrawal hash and L2 block number, parsed from the
+`MessagePassed` event — and write it to `./withdrawals/<l2TxHash>.json`. Those
+parameters are not recoverable from the chain by this tool. If the write fails,
+the whole operation fails: a withdrawal whose parameters were lost cannot be
+completed at all.
+
+Every 256-bit value in that file is a **decimal string**, not a JSON number. The
+message nonce is routinely above 2^53, where most JSON readers would silently
+corrupt it.
 
 ### How a deposit is confirmed
 
@@ -67,6 +85,7 @@ export it; `.env` is gitignored.
 | `BRIDGE_DEST_CHAIN_ID` | `11155111` or `84532`. Any other value is rejected. |
 | `BRIDGE_L1_RPC_URL` | Ethereum Sepolia endpoint. Required only if the route touches L1. |
 | `BRIDGE_L2_RPC_URL` | Base Sepolia endpoint. Required only if the route touches L2. |
+| `BRIDGE_WITHDRAWALS_DIR` | Optional. Where initiated withdrawals are recorded. Defaults to `./withdrawals`. |
 
 The last two are the mechanically-required additions to the five configuration
 items the tool is specified around — you cannot reach a chain without an
@@ -98,7 +117,7 @@ tx:     0x…
 https://sepolia.basescan.org/tx/0x…
 
 $ ./bridge version
-0.2.0
+0.3.0
 ```
 
 For a deposit, set `BRIDGE_SOURCE_CHAIN_ID=11155111`,
@@ -130,11 +149,14 @@ receipt status `1`:
 |---|---|---|
 | T1 | Same-chain, Base Sepolia | [`0x88f28f…2b86d6`](https://sepolia.basescan.org/tx/0x88f28f33fc37a8590ac837131fdb342718eafaed0827117a2b742bc7fb2b86d6) |
 | T2 | Same-chain, Ethereum Sepolia | [`0xc2e0dc…fd11c6`](https://sepolia.etherscan.io/tx/0xc2e0dc1450c4d0157efe906d58da9d0401bf895a1a64c6c52fd86201befd11c6) |
-| T3 | Deposit, L1 side | [`0x75a347…e0a067`](https://sepolia.etherscan.io/tx/0x75a3476eaf3d1fa5fd730fb90c9f88a0817f156a2af5193268342a3430e0a067) |
-| T3 | Deposit, L2 side (hash *derived*, then fetched back) | [`0x72eceb…a9696d`](https://sepolia.basescan.org/tx/0x72eceb7b5bf29181dca54ec420c98098c5a3756ec522f47e551f5e3498a9696d) |
+| T3 | Deposit, L1 side | [`0x09f026…42baab`](https://sepolia.etherscan.io/tx/0x09f0263efa43bb352f61edf9f71d36ffa26a3330acd153a7793412b5ee42baab) |
+| T3 | Deposit, L2 side (hash *derived*, then fetched back) | [`0x5675ab…2c0cb0`](https://sepolia.basescan.org/tx/0x5675ab60d527d46b3970eac8753a855345da62002e7e8115400b3a84ad2c0cb0) |
+| T4 | Withdrawal, initiated on L2 | [`0x4d7f1c…137a80`](https://sepolia.basescan.org/tx/0x4d7f1c86df2dd711d777648c2da6478f860927e164de29c5a2fd5f1f4a137a80) |
 
 T3 bridged 0.0005 ETH from Ethereum Sepolia to Base Sepolia and observed the
-full 500000000000000 wei credited on L2.
+full 500000000000000 wei credited on L2. T4 initiated a 0.00001 ETH withdrawal
+and captured its proof parameters; that withdrawal is **not** finished, and this
+tool will not finish it.
 
 ---
 
@@ -162,8 +184,11 @@ That is only achievable if untestable code is designed out rather than waived:
   defaults to a local key but can be replaced, which is what a KMS or hardware
   wallet would need. `bridge.DepositEncoder` is the same idea for the bridge
   ABI. Both also make their failure paths reachable.
-- **`internal/opstack`** owns the hand-written deposit ABI and the L2 hash
-  derivation. `L2TxHash` joins parsing and hashing into one call so that
+- **`internal/store`** writes the withdrawal record. `encode` validates and
+  renders in one function so that the "incomplete record" path is a real,
+  reachable check rather than a dead error branch.
+- **`internal/opstack`** owns the hand-written deposit and withdrawal ABIs, the
+  L2 hash derivation, and the `MessagePassed` decoding. `L2TxHash` joins parsing and hashing into one call so that
   callers have one error to handle rather than an unreachable second branch.
 
 Where a branch turned out to be genuinely unreachable, the code was restructured
@@ -209,17 +234,24 @@ Unused gas is refunded, so the margin costs nothing when it is not needed.
 
 ## Roadmap
 
-### v0.3.0 — L2 → L1 withdrawal, initiate only
+### v0.4.0 — prove and finalize
 
-`L2StandardBridge.withdrawTo`, parsing `MessagePassed` and writing the
-withdrawal proof parameters to disk.
+The missing two thirds of a withdrawal. Both are L1 transactions against the
+`OptimismPortal`, and both need the JSON written by the initiate step:
 
-**Prove and finalize will not be provided.** An Optimism-stack withdrawal needs
-a second transaction after the fault-proof window — roughly seven days — and a
-third after that. A CLI that initiates a withdrawal and then requires the same
-operator to still have the JSON file and a funded L1 account a week later is not
-a bridge; it is half of one with a homework assignment attached. Until this can
-prove and finalize, it will not pretend to withdraw.
+- **prove** requires the withdrawal parameters plus a Merkle-Patricia proof of
+  the `L2ToL1MessagePasser` storage slot, against an output root that covers the
+  recorded `l2BlockNumber`.
+- **finalize** requires only the parameters, but not until the fault-proof
+  window has elapsed.
+
+The awkward part is not the cryptography, it is the shape: this is a tool that
+would have to be run again a week later, which means state, scheduling and a
+story for what happens when the operator's machine is gone. That design decision
+is worth making deliberately rather than bolting on.
+
+Until then the tool initiates withdrawals, records what finishing one needs, and
+says plainly that it is not finishing it.
 
 ---
 

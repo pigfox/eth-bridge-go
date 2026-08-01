@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -216,20 +218,17 @@ func TestSendRuntimeErrorExitsOne(t *testing.T) {
 	}
 }
 
-// Withdrawal is resolved but not implemented in this version. The CLI must say
-// so rather than pretend.
-func TestDispatchWithdrawalIsNotImplemented(t *testing.T) {
-	withDial(t, func(context.Context, string) (chain.Client, error) {
-		t.Error("dialled a node for an unimplemented route")
-		return nil, errBoom
-	})
+func TestDispatchWithdrawalDialFailure(t *testing.T) {
+	withDial(t, func(context.Context, string) (chain.Client, error) { return nil, errBoom })
 
 	cfg := config.Config{
 		SourceChainID: config.ChainIDBaseSepolia,
 		DestChainID:   config.ChainIDEthSepolia,
+		L1RPCURL:      "l1",
+		L2RPCURL:      "l2",
 	}
-	if _, err := dispatch(context.Background(), cfg, big.NewInt(1)); !errors.Is(err, route.ErrNotImplemented) {
-		t.Fatalf("error = %v, want route.ErrNotImplemented", err)
+	if _, err := dispatch(context.Background(), cfg, big.NewInt(1)); !errors.Is(err, errBoom) {
+		t.Fatalf("error = %v, want errBoom", err)
 	}
 }
 
@@ -470,5 +469,80 @@ func TestReportIsSilentWithoutATransaction(t *testing.T) {
 	report(&buf, config.Config{}, bridge.Result{})
 	if buf.Len() != 0 {
 		t.Errorf("report wrote %q, want nothing", buf.String())
+	}
+}
+
+// withdrawEnv is a valid Base Sepolia -> Eth Sepolia withdrawal environment.
+func withdrawEnv() map[string]string {
+	m := baseEnv()
+	m[config.EnvDestChainID] = "11155111"
+	m[config.EnvL1RPCURL] = "https://eth-sepolia.example"
+	return m
+}
+
+func TestSendWithdrawalPrintsTheFinalizationNotice(t *testing.T) {
+	dir := t.TempDir()
+	env := withdrawEnv()
+	env[config.EnvWithdrawalsDir] = dir
+	withEnv(t, env)
+
+	amount := big.NewInt(10_000_000_000_000)
+	w := func(v *big.Int) []byte { return common.LeftPadBytes(v.Bytes(), 32) }
+	data := make([]byte, 0, 160)
+	data = append(data, w(amount)...)
+	data = append(data, w(big.NewInt(200000))...)
+	data = append(data, w(big.NewInt(128))...)
+	data = append(data, common.HexToHash("0xfeed").Bytes()...)
+	data = append(data, w(big.NewInt(0))...)
+
+	c := &fake.Client{}
+	c.PushChainID(big.NewInt(84532), nil)
+	c.PushNonce(1, nil)
+	c.PushTipCap(big.NewInt(1_000_000), nil)
+	c.PushHeader(&types.Header{BaseFee: big.NewInt(1_000_000)}, nil)
+	c.PushGas(150_000, nil)
+	c.PushSend(nil)
+	c.PushReceipt(&types.Receipt{
+		Status:      types.ReceiptStatusSuccessful,
+		BlockNumber: big.NewInt(44917575),
+		Logs: []*types.Log{{
+			Topics: []common.Hash{
+				opstack.MessagePassedTopic,
+				common.BigToHash(big.NewInt(9)),
+				common.BytesToHash(common.HexToAddress("0x4200000000000000000000000000000000000007").Bytes()),
+				common.BytesToHash(common.HexToAddress("0xC34855F4De64F1840e5686e64278da901e261f20").Bytes()),
+			},
+			Data:        data,
+			BlockNumber: 44917575,
+			TxHash:      common.HexToHash("0xabc"),
+		}},
+	}, nil)
+
+	withDial(t, func(context.Context, string) (chain.Client, error) { return c, nil })
+
+	code, stdout, stderr := exec("send", "--amount", "0.00001")
+	if code != exitOK {
+		t.Fatalf("exit code = %d (stderr: %s)", code, stderr)
+	}
+	for _, want := range []string{
+		"route:  withdraw-initiate",
+		"src tx: 0x",
+		"hash:   0x",
+		"block:  44917575",
+		"saved:  ",
+		"only INITIATED the withdrawal",
+		"The ETH is not on L1",
+		"eth-bridge-go performs NEITHER",
+		"roughly 7 days",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout %q does not contain %q", stdout, want)
+		}
+	}
+
+	// The record must actually be on disk where the output says it is.
+	saved := filepath.Join(dir, c.Sent()[0].Hash().Hex()+".json")
+	if _, err := os.Stat(saved); err != nil {
+		t.Errorf("no record at %s: %v", saved, err)
 	}
 }

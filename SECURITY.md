@@ -36,6 +36,13 @@ tracked file, that is a bug — please report it.
 key whose address is not the one the operator named means spending an account
 they did not intend to spend from.
 
+## Withdrawal records are sensitive
+
+`./withdrawals/<l2TxHash>.json` is the only copy of what proving a withdrawal
+later needs, and it describes ETH that has not been claimed yet. The files are
+written `0600`, the directory `0750`, and `withdrawals/` is gitignored. Losing
+one does not let anyone else claim the withdrawal, but it does mean you cannot.
+
 ## Reporting
 
 Open an issue at https://github.com/pigfox/eth-bridge-go/issues. Since this is

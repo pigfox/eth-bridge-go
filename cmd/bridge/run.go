@@ -19,7 +19,7 @@ import (
 )
 
 // version is the released version of this command.
-const version = "0.2.0"
+const version = "0.3.0"
 
 // Exit codes. Anything the operator can fix by retyping the command is a usage
 // error; anything that needed the network or the chain to cooperate is a
@@ -61,6 +61,8 @@ configuration is read from the environment:
   BRIDGE_DEST_CHAIN_ID     11155111 (Eth Sepolia) or 84532 (Base Sepolia)
   BRIDGE_L1_RPC_URL        Ethereum Sepolia endpoint, if the route touches L1
   BRIDGE_L2_RPC_URL        Base Sepolia endpoint, if the route touches L2
+  BRIDGE_WITHDRAWALS_DIR   where to record initiated withdrawals
+                           (optional, defaults to ./withdrawals)
 `
 
 // run is the whole command. It returns the process exit code.
@@ -138,7 +140,31 @@ func report(stdout io.Writer, cfg config.Config, res bridge.Result) {
 	if res.Credited != nil {
 		fmt.Fprintf(stdout, "credit: %s wei on chain %d\n", res.Credited, cfg.DestChainID)
 	}
+	if res.Withdrawal != nil {
+		fmt.Fprintf(stdout, "hash:   %s\n", res.Withdrawal.WithdrawalHash.Hex())
+		fmt.Fprintf(stdout, "block:  %s\n", res.Withdrawal.L2BlockNumber)
+	}
+	if res.WithdrawalPath != "" {
+		fmt.Fprintf(stdout, "saved:  %s\n", res.WithdrawalPath)
+	}
+	if res.Kind == route.KindWithdrawInitiate {
+		fmt.Fprint(stdout, withdrawalNotice)
+	}
 }
+
+// withdrawalNotice is printed after every initiated withdrawal. Someone who
+// stops reading here must still come away knowing the ETH is not on L1 and that
+// two more transactions are needed.
+const withdrawalNotice = `
+NOTE: this only INITIATED the withdrawal. The ETH is not on L1.
+
+Two more transactions are required, and eth-bridge-go performs NEITHER:
+  1. prove    — once an L2 output root covering the block above is published
+  2. finalize — after the fault-proof window, roughly 7 days on Base Sepolia
+
+The saved JSON holds the parameters both steps need. They cannot be
+reconstructed by this tool, so do not delete it.
+`
 
 // dispatch resolves the configured route and runs it.
 //
@@ -152,8 +178,6 @@ func dispatch(ctx context.Context, cfg config.Config, amount *big.Int) (bridge.R
 		return bridge.Result{}, err
 	}
 
-	// Withdrawal is recognised by the resolver and falls to the default arm,
-	// which says so plainly rather than half-doing it.
 	switch kind {
 	case route.KindSameChain:
 		c, err := dialChain(ctx, cfg, cfg.SourceChainID)
@@ -175,7 +199,15 @@ func dispatch(ctx context.Context, cfg config.Config, amount *big.Int) (bridge.R
 		defer dst.Close()
 		return bridge.New(cfg, src, dst).Deposit(ctx, amount)
 	default:
-		return bridge.Result{}, fmt.Errorf("%w: %s", route.ErrNotImplemented, kind)
+		// Resolve returns an error for anything it does not recognise, and
+		// that error was handled above. The only kind left here is
+		// withdraw-initiate, so this arm is it rather than a dead fallback.
+		c, err := dialChain(ctx, cfg, cfg.SourceChainID)
+		if err != nil {
+			return bridge.Result{}, err
+		}
+		defer c.Close()
+		return bridge.New(cfg, c, c, bridge.WithWithdrawalsDir(cfg.WithdrawalsDir)).WithdrawInitiate(ctx, amount)
 	}
 }
 

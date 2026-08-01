@@ -448,24 +448,6 @@ func TestLocalSignerProducesARecoverableSignature(t *testing.T) {
 	}
 }
 
-// Withdrawal is recognised by the router but does not ship in this version. It
-// must say so rather than do something surprising.
-func TestWithdrawInitiateIsNotImplemented(t *testing.T) {
-	c := &fake.Client{}
-	b := New(testCfg(t), c, c)
-
-	res, err := b.WithdrawInitiate(context.Background(), big.NewInt(1))
-	if !errors.Is(err, route.ErrNotImplemented) {
-		t.Fatalf("error = %v, want route.ErrNotImplemented", err)
-	}
-	if res.SrcTxHash != (common.Hash{}) || res.Amount != nil {
-		t.Errorf("result = %+v, want the zero value", res)
-	}
-	if len(c.Sent()) != 0 {
-		t.Error("an unimplemented route broadcast a transaction")
-	}
-}
-
 func TestNewAppliesDefaultsAndOptions(t *testing.T) {
 	c := &fake.Client{}
 

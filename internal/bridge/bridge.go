@@ -21,6 +21,7 @@ import (
 	"github.com/pigfox/eth-bridge-go/internal/config"
 	"github.com/pigfox/eth-bridge-go/internal/opstack"
 	"github.com/pigfox/eth-bridge-go/internal/route"
+	"github.com/pigfox/eth-bridge-go/internal/store"
 )
 
 // Errors returned by the bridge.
@@ -43,6 +44,11 @@ var (
 	ErrDepositNotCredited = errors.New("deposit not credited on the destination chain")
 )
 
+// WithdrawalWriter records an initiated withdrawal so that it can be proved
+// later. It is a plug point so that a caller can put the record somewhere other
+// than the local filesystem.
+type WithdrawalWriter func(txHash common.Hash, w opstack.Withdrawal) (string, error)
+
 // Result describes a completed bridge operation.
 type Result struct {
 	// Kind is the route that was taken.
@@ -58,6 +64,10 @@ type Result struct {
 	// Credited is the increase actually observed at the destination address,
 	// in wei. It is nil for routes that do not cross a domain.
 	Credited *big.Int
+	// Withdrawal is the parsed withdrawal, and WithdrawalPath is where its
+	// parameters were recorded. Both are set only for a withdrawal.
+	Withdrawal     *opstack.Withdrawal
+	WithdrawalPath string
 }
 
 // Signer signs a transaction on behalf of the source account.
@@ -82,6 +92,10 @@ func LocalSigner(key *ecdsa.PrivateKey) Signer {
 // different encoder rather than a change to the transaction-building code.
 type DepositEncoder func(to common.Address, minGasLimit uint32) ([]byte, error)
 
+// WithdrawEncoder builds the calldata for a bridge withdrawal. It is the
+// withdrawal-side counterpart to DepositEncoder.
+type WithdrawEncoder func(l2Token, to common.Address, amount *big.Int, minGasLimit uint32) ([]byte, error)
+
 // Option customises a Bridger.
 type Option func(*Bridger)
 
@@ -98,6 +112,38 @@ func WithConfirmTimeout(d time.Duration) Option {
 // WithPollInterval overrides the gap between confirmation polls.
 func WithPollInterval(d time.Duration) Option {
 	return func(b *Bridger) { b.pollInterval = d }
+}
+
+// WithWithdrawEncoder replaces the standard-bridge withdrawal encoder.
+func WithWithdrawEncoder(e WithdrawEncoder) Option {
+	return func(b *Bridger) { b.encodeWithdraw = e }
+}
+
+// WithL2StandardBridge overrides the L2 Standard Bridge address.
+func WithL2StandardBridge(addr common.Address) Option {
+	return func(b *Bridger) { b.l2Bridge = addr }
+}
+
+// WithWithdrawMinGasLimit overrides the gas reserved for the L1 execution.
+func WithWithdrawMinGasLimit(g uint32) Option {
+	return func(b *Bridger) { b.withdrawMinGasLimit = g }
+}
+
+// WithWithdrawalWriter replaces where initiated withdrawals are recorded.
+func WithWithdrawalWriter(w WithdrawalWriter) Option {
+	return func(b *Bridger) { b.writeWithdrawal = w }
+}
+
+// WithWithdrawalsDir sets the directory initiated withdrawals are written to.
+func WithWithdrawalsDir(dir string) Option {
+	return func(b *Bridger) { b.writeWithdrawal = fileWriter(dir) }
+}
+
+// fileWriter records withdrawals as JSON files under dir.
+func fileWriter(dir string) WithdrawalWriter {
+	return func(h common.Hash, w opstack.Withdrawal) (string, error) {
+		return store.SaveWithdrawal(dir, h, w)
+	}
 }
 
 // WithGasMarginPercent overrides the margin added to every gas estimate.
@@ -141,6 +187,11 @@ type Bridger struct {
 	depositMinGasLimit uint32
 	encodeDeposit      DepositEncoder
 	gasMarginPercent   uint64
+
+	l2Bridge            common.Address
+	withdrawMinGasLimit uint32
+	writeWithdrawal     WithdrawalWriter
+	encodeWithdraw      WithdrawEncoder
 }
 
 // New builds a Bridger over the given source and destination clients.
@@ -160,6 +211,11 @@ func New(cfg config.Config, src, dst chain.Client, opts ...Option) *Bridger {
 		depositMinGasLimit: config.DefaultDepositMinGasLimit,
 		encodeDeposit:      opstack.DepositETHToCalldata,
 		gasMarginPercent:   config.DefaultGasMarginPercent,
+
+		l2Bridge:            common.HexToAddress(config.L2StandardBridgePredeploy),
+		withdrawMinGasLimit: config.DefaultWithdrawMinGasLimit,
+		encodeWithdraw:      opstack.WithdrawToCalldata,
+		writeWithdrawal:     fileWriter(config.DefaultWithdrawalsDir),
 	}
 	for _, opt := range opts {
 		opt(b)
@@ -382,8 +438,59 @@ func (b *Bridger) waitForCredit(ctx context.Context, before *big.Int) (*big.Int,
 	}
 }
 
-// WithdrawInitiate starts an L2 to L1 withdrawal. It is recognised by the
-// router but not implemented in this version; see the roadmap in the README.
-func (b *Bridger) WithdrawInitiate(context.Context, *big.Int) (Result, error) {
-	return Result{}, fmt.Errorf("%w: %s", route.ErrNotImplemented, route.KindWithdrawInitiate)
+// WithdrawInitiate starts an L2 to L1 withdrawal and records what proving it
+// later will need.
+//
+// This is the first of three transactions. It does not move ETH to L1: the
+// withdrawal must be proved once an L2 output root covering its block is
+// published, and finalized after the fault-proof window, neither of which this
+// tool performs. The parameters are written to disk because they are not
+// recoverable from the chain by this tool, and without them the withdrawal
+// cannot be completed at all.
+func (b *Bridger) WithdrawInitiate(ctx context.Context, amount *big.Int) (Result, error) {
+	if amount == nil || amount.Sign() <= 0 {
+		return Result{}, ErrAmountNotPositive
+	}
+	if err := b.verifyChain(ctx, b.src, b.cfg.SourceChainID); err != nil {
+		return Result{}, err
+	}
+
+	data, err := b.encodeWithdraw(
+		common.HexToAddress(config.LegacyERC20ETH),
+		b.cfg.DestAddr, amount, b.withdrawMinGasLimit,
+	)
+	if err != nil {
+		return Result{}, fmt.Errorf("encode withdrawal calldata: %w", err)
+	}
+
+	tx, err := b.signedTransfer(ctx, b.l2Bridge, amount, data)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := b.src.SendTransaction(ctx, tx); err != nil {
+		return Result{}, fmt.Errorf("broadcast withdrawal: %w", err)
+	}
+
+	res := Result{Kind: route.KindWithdrawInitiate, SrcTxHash: tx.Hash(), Amount: new(big.Int).Set(amount)}
+
+	rcpt, err := b.WaitReceipt(ctx, b.src, tx.Hash())
+	if err != nil {
+		return res, err
+	}
+
+	wd, err := opstack.ParseMessagePassed(rcpt)
+	if err != nil {
+		return res, fmt.Errorf("read withdrawal parameters from receipt: %w", err)
+	}
+	res.Withdrawal = &wd
+
+	// The record is written before success is reported. A withdrawal that was
+	// initiated but whose parameters were lost is unprovable, so failing to
+	// write is a failure of the whole operation, not a warning.
+	path, err := b.writeWithdrawal(tx.Hash(), wd)
+	if err != nil {
+		return res, fmt.Errorf("record withdrawal: %w", err)
+	}
+	res.WithdrawalPath = path
+	return res, nil
 }

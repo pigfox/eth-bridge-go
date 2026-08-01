@@ -1,0 +1,12 @@
+{
+  "nonce": "9",
+  "sender": "0x4200000000000000000000000000000000000007",
+  "target": "0xC34855F4De64F1840e5686e64278da901e261f20",
+  "value": "10000000000000",
+  "gasLimit": "200000",
+  "data": "0x",
+  "withdrawalHash": "0x000000000000000000000000000000000000000000000000000000000000feed",
+  "l2BlockNumber": "44917575",
+  "l2TxHash": "0x0000000000000000000000000000000000000000000000000000000000000abc",
+  "note": "Initiated L2-\u003eL1 withdrawal. Proving and finalizing are NOT performed by eth-bridge-go: prove after the L2 output root covering l2BlockNumber is published, then finalize after the fault-proof window (~7 days on Base Sepolia)."
+}

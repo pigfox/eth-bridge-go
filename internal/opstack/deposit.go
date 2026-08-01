@@ -48,11 +48,16 @@ func DepositETHToCalldata(to common.Address, minGasLimit uint32) ([]byte, error)
 // the constant, so that the parse-failure path is reachable from a test instead
 // of being a panic in a package initialiser that nothing can exercise.
 func packDepositETHTo(abiJSON string, to common.Address, minGasLimit uint32) ([]byte, error) {
-	parsed, err := abi.JSON(strings.NewReader(abiJSON))
+	parsed, err := parseABI(abiJSON)
 	if err != nil {
 		return nil, fmt.Errorf("parse deposit ABI: %w", err)
 	}
 	return parsed.Pack("depositETHTo", to, minGasLimit, []byte{})
+}
+
+// parseABI parses one of this package's embedded ABI fragments.
+func parseABI(abiJSON string) (abi.ABI, error) {
+	return abi.JSON(strings.NewReader(abiJSON))
 }
 
 // TransactionDepositedTopic is the topic0 of
@@ -154,7 +159,7 @@ func L2TxHash(rcpt *types.Receipt) (common.Hash, error) {
 //
 // where the leading zero is the "user deposit" source domain.
 func ParseDeposit(rcpt *types.Receipt) (Deposit, error) {
-	entry := findDepositLog(rcpt)
+	entry := findLog(rcpt, TransactionDepositedTopic)
 	if entry == nil {
 		return Deposit{}, ErrNoDepositLog
 	}
@@ -183,10 +188,10 @@ func ParseDeposit(rcpt *types.Receipt) (Deposit, error) {
 	return d, nil
 }
 
-// findDepositLog returns the first TransactionDeposited log in the receipt.
-func findDepositLog(rcpt *types.Receipt) *types.Log {
+// findLog returns the first log in the receipt with the given topic0.
+func findLog(rcpt *types.Receipt, topic common.Hash) *types.Log {
 	for _, l := range rcpt.Logs {
-		if len(l.Topics) > 0 && l.Topics[0] == TransactionDepositedTopic {
+		if len(l.Topics) > 0 && l.Topics[0] == topic {
 			return l
 		}
 	}

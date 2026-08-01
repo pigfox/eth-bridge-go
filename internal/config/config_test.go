@@ -217,3 +217,34 @@ func TestSupportedChainID(t *testing.T) {
 		}
 	}
 }
+
+// The withdrawals directory is optional, because most routes never write one.
+func TestWithdrawalsDirDefaultsAndOverrides(t *testing.T) {
+	cfg, err := Load(env(baseEnv(t)))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WithdrawalsDir != DefaultWithdrawalsDir {
+		t.Errorf("WithdrawalsDir = %q, want the default %q", cfg.WithdrawalsDir, DefaultWithdrawalsDir)
+	}
+
+	m := baseEnv(t)
+	m[EnvWithdrawalsDir] = "  /var/withdrawals  "
+	cfg, err = Load(env(m))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WithdrawalsDir != "/var/withdrawals" {
+		t.Errorf("WithdrawalsDir = %q, want it trimmed", cfg.WithdrawalsDir)
+	}
+
+	// Whitespace is not an override.
+	m[EnvWithdrawalsDir] = "   "
+	cfg, err = Load(env(m))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WithdrawalsDir != DefaultWithdrawalsDir {
+		t.Errorf("WithdrawalsDir = %q, want the default", cfg.WithdrawalsDir)
+	}
+}

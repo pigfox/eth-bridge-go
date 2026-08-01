@@ -26,7 +26,26 @@ const (
 	OptimismPortalSepolia = "0x49f53e41452C74589E85cA1677426Ba426459e85"
 	// L2StandardBridgePredeploy is the L2 side of the standard bridge.
 	L2StandardBridgePredeploy = "0x4200000000000000000000000000000000000010"
+	// L2ToL1MessagePasserPredeploy emits the MessagePassed event that carries
+	// the parameters a withdrawal is later proved with.
+	L2ToL1MessagePasserPredeploy = "0x4200000000000000000000000000000000000016"
 )
+
+// LegacyERC20ETH is the sentinel token address that means "ETH" to
+// L2StandardBridge.withdrawTo.
+//
+// This is Predeploys.LEGACY_ERC20_ETH. The other sentinel in circulation,
+// 0xEeee...EEeE (Constants.ETHER), is *not* accepted by the bridge deployed on
+// Base Sepolia: an eth_call with it reverts, while this address succeeds. The
+// deployed L2StandardBridge reports version 1.3.0.
+const LegacyERC20ETH = "0xDeadDeAddeAddEAddeadDEaDDEAdDeaDDeAD0000"
+
+// DefaultWithdrawMinGasLimit is the gas reserved for the withdrawal's eventual
+// execution on L1.
+const DefaultWithdrawMinGasLimit uint32 = 200000
+
+// DefaultWithdrawalsDir is where initiated withdrawals are recorded.
+const DefaultWithdrawalsDir = "withdrawals"
 
 // DefaultDepositMinGasLimit is the gas made available to the deposit's
 // execution on L2. 200k is the value the Base documentation uses for a simple
@@ -64,6 +83,8 @@ const (
 	EnvDestChainID   = "BRIDGE_DEST_CHAIN_ID"
 	EnvL1RPCURL      = "BRIDGE_L1_RPC_URL"
 	EnvL2RPCURL      = "BRIDGE_L2_RPC_URL"
+	// EnvWithdrawalsDir is optional and defaults to DefaultWithdrawalsDir.
+	EnvWithdrawalsDir = "BRIDGE_WITHDRAWALS_DIR"
 )
 
 // redacted is what stands in for the private key everywhere the configuration

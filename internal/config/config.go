@@ -38,6 +38,9 @@ type Config struct {
 	// actually needs are required to be set.
 	L1RPCURL string
 	L2RPCURL string
+	// WithdrawalsDir is where initiated withdrawals are recorded. It is
+	// optional and defaults to DefaultWithdrawalsDir.
+	WithdrawalsDir string
 
 	// sourceKey is unexported so that it cannot be reached by reflection-based
 	// formatting of the struct from outside this package.
@@ -118,7 +121,16 @@ func Load(getenv func(string) string) (Config, error) {
 	if cfg.L1RPCURL, cfg.L2RPCURL, err = requireRPCs(getenv, cfg.SourceChainID, cfg.DestChainID); err != nil {
 		return Config{}, err
 	}
+	cfg.WithdrawalsDir = orDefault(getenv(EnvWithdrawalsDir), DefaultWithdrawalsDir)
 	return cfg, nil
+}
+
+// orDefault returns the trimmed value, or fallback when it is empty.
+func orDefault(value, fallback string) string {
+	if v := strings.TrimSpace(value); v != "" {
+		return v
+	}
+	return fallback
 }
 
 // require returns the trimmed value of name, or ErrMissing if it is empty.
