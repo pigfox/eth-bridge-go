@@ -34,14 +34,26 @@ func depositCfg(t *testing.T) config.Config {
 			config.EnvDestAddr:      destAddr,
 			config.EnvSourceChainID: "11155111",
 			config.EnvDestChainID:   "84532",
-			config.EnvL1RPCURL:      "https://eth-sepolia.example",
-			config.EnvL2RPCURL:      "https://base-sepolia.example",
+			config.EnvSourceRPCURL:  "https://eth-sepolia.example",
+			config.EnvDestRPCURL:    "https://base-sepolia.example",
 		}[k]
 	})
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
 	return cfg
+}
+
+// testL1Bridge stands in for whatever discovery would have found. It is a made-up
+// address on purpose: the bridge no longer has a default one, so a test that
+// let a real address leak back in would be testing the wrong thing.
+var testL1Bridge = common.HexToAddress("0xB41d6e0000000000000000000000000000000001")
+
+// depositOpts are the options every deposit test needs: the fast-clock options,
+// plus the L1 bridge address that discovery supplies in production.
+func depositOpts(extra ...Option) []Option {
+	opts := append(fastOpts(), WithL1StandardBridge(testL1Bridge))
+	return append(opts, extra...)
 }
 
 // depositReceipt is an L1 receipt carrying a well-formed TransactionDeposited
@@ -98,7 +110,7 @@ func TestDepositHappyPath(t *testing.T) {
 	l2.PushBalance(big.NewInt(1_000), nil)
 	l2.PushBalance(new(big.Int).Add(big.NewInt(1_000), amount), nil)
 
-	res, err := New(cfg, l1, l2, fastOpts()...).Deposit(context.Background(), amount)
+	res, err := New(cfg, l1, l2, depositOpts()...).Deposit(context.Background(), amount)
 	if err != nil {
 		t.Fatalf("Deposit: %v", err)
 	}
@@ -120,8 +132,8 @@ func TestDepositHappyPath(t *testing.T) {
 		t.Fatalf("sent %d L1 transactions, want 1", len(sent))
 	}
 	tx := sent[0]
-	if got := tx.To(); got == nil || *got != common.HexToAddress(config.L1StandardBridgeSepolia) {
-		t.Errorf("To = %v, want the L1 standard bridge", got)
+	if got := tx.To(); got == nil || *got != testL1Bridge {
+		t.Errorf("To = %v, want the L1 standard bridge %s", got, testL1Bridge.Hex())
 	}
 	if tx.Value().Cmp(amount) != 0 {
 		t.Errorf("value = %s, want %s", tx.Value(), amount)
@@ -152,7 +164,7 @@ func TestDepositHappyPath(t *testing.T) {
 func TestDepositRejectsNonPositiveAmount(t *testing.T) {
 	for _, amount := range []*big.Int{nil, big.NewInt(0), big.NewInt(-5)} {
 		l1, l2 := &fake.Client{}, &fake.Client{}
-		_, err := New(depositCfg(t), l1, l2, fastOpts()...).Deposit(context.Background(), amount)
+		_, err := New(depositCfg(t), l1, l2, depositOpts()...).Deposit(context.Background(), amount)
 		if !errors.Is(err, ErrAmountNotPositive) {
 			t.Errorf("amount %v: error = %v, want ErrAmountNotPositive", amount, err)
 		}
@@ -243,7 +255,7 @@ func TestDepositFailuresBeforeBroadcast(t *testing.T) {
 			l1, l2 := &fake.Client{}, &fake.Client{}
 			tc.script(l1, l2)
 
-			res, err := New(depositCfg(t), l1, l2, append(fastOpts(), tc.opts...)...).
+			res, err := New(depositCfg(t), l1, l2, depositOpts(tc.opts...)...).
 				Deposit(context.Background(), amount)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("error = %v, want errors.Is %v", err, tc.wantErr)
@@ -276,7 +288,7 @@ func TestDepositFailuresAfterBroadcastStillReportTheL1Hash(t *testing.T) {
 		l1.PushSend(nil)
 		l1.PushReceipt(&types.Receipt{Status: types.ReceiptStatusFailed}, nil)
 
-		res, err := New(depositCfg(t), l1, l2, fastOpts()...).Deposit(context.Background(), amount)
+		res, err := New(depositCfg(t), l1, l2, depositOpts()...).Deposit(context.Background(), amount)
 		if !errors.Is(err, ErrTxReverted) {
 			t.Fatalf("error = %v, want ErrTxReverted", err)
 		}
@@ -297,7 +309,7 @@ func TestDepositFailuresAfterBroadcastStillReportTheL1Hash(t *testing.T) {
 		l1.PushSend(nil)
 		l1.PushReceipt(&types.Receipt{Status: types.ReceiptStatusSuccessful}, nil)
 
-		res, err := New(depositCfg(t), l1, l2, fastOpts()...).Deposit(context.Background(), amount)
+		res, err := New(depositCfg(t), l1, l2, depositOpts()...).Deposit(context.Background(), amount)
 		if !errors.Is(err, opstack.ErrNoDepositLog) {
 			t.Fatalf("error = %v, want opstack.ErrNoDepositLog", err)
 		}
@@ -314,7 +326,7 @@ func TestDepositFailuresAfterBroadcastStillReportTheL1Hash(t *testing.T) {
 		scriptDeposit(l1, l2, amount)
 		l2.PushBalance(big.NewInt(1_000), nil) // unchanged
 
-		res, err := New(depositCfg(t), l1, l2,
+		res, err := New(depositCfg(t), l1, l2, WithL1StandardBridge(testL1Bridge),
 			WithSleeper(noSleep), WithConfirmTimeout(-time.Second),
 		).Deposit(context.Background(), amount)
 		if !errors.Is(err, ErrDepositNotCredited) {
@@ -333,7 +345,7 @@ func TestDepositFailuresAfterBroadcastStillReportTheL1Hash(t *testing.T) {
 		scriptDeposit(l1, l2, amount)
 		l2.PushBalance(nil, errBoom)
 
-		_, err := New(depositCfg(t), l1, l2, fastOpts()...).Deposit(context.Background(), amount)
+		_, err := New(depositCfg(t), l1, l2, depositOpts()...).Deposit(context.Background(), amount)
 		if !errors.Is(err, errBoom) {
 			t.Fatalf("error = %v, want errBoom", err)
 		}
@@ -344,7 +356,7 @@ func TestDepositFailuresAfterBroadcastStillReportTheL1Hash(t *testing.T) {
 		scriptDeposit(l1, l2, amount)
 		l2.PushBalance(big.NewInt(1_000), nil) // unchanged, so it sleeps
 
-		_, err := New(depositCfg(t), l1, l2,
+		_, err := New(depositCfg(t), l1, l2, WithL1StandardBridge(testL1Bridge),
 			WithConfirmTimeout(time.Hour),
 			WithSleeper(func(context.Context, time.Duration) error { return context.Canceled }),
 		).Deposit(context.Background(), amount)
@@ -370,15 +382,32 @@ func TestDepositOptions(t *testing.T) {
 		t.Errorf("depositMinGasLimit = %d, want 42", b.depositMinGasLimit)
 	}
 
-	// And the defaults are the verified Base Sepolia values.
+	// There is deliberately no default L1 bridge. It names one particular
+	// rollup, and a wrong guess sends real value to the wrong contract, so the
+	// zero value is left in place for Deposit to refuse.
 	d := New(depositCfg(t), &fake.Client{}, &fake.Client{})
-	if d.l1Bridge != common.HexToAddress(config.L1StandardBridgeSepolia) {
-		t.Errorf("default l1Bridge = %s", d.l1Bridge.Hex())
+	if d.l1Bridge != (common.Address{}) {
+		t.Errorf("default l1Bridge = %s, want the zero address", d.l1Bridge.Hex())
 	}
 	if d.depositMinGasLimit != config.DefaultDepositMinGasLimit {
 		t.Errorf("default minGasLimit = %d", d.depositMinGasLimit)
 	}
 	if d.encodeDeposit == nil {
 		t.Error("New left the deposit encoder nil")
+	}
+}
+
+// A deposit with no bridge address must stop before it touches the chain. The
+// zero address is a real, spendable destination, so sending to it would burn
+// the value rather than fail.
+func TestDepositWithoutABridgeAddressRefusesToSend(t *testing.T) {
+	l1, l2 := &fake.Client{}, &fake.Client{}
+
+	_, err := New(depositCfg(t), l1, l2, fastOpts()...).Deposit(context.Background(), big.NewInt(1))
+	if !errors.Is(err, ErrNoBridgeAddress) {
+		t.Fatalf("error = %v, want ErrNoBridgeAddress", err)
+	}
+	if len(l1.Sent()) != 0 {
+		t.Error("a deposit was broadcast without a bridge address")
 	}
 }

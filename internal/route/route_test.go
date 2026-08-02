@@ -1,66 +1,205 @@
 package route
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
-	"github.com/pigfox/eth-bridge-go/internal/config"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
+
+	"github.com/pigfox/eth-bridge-go/internal/chain/fake"
+	"github.com/pigfox/eth-bridge-go/internal/opstack"
 )
 
-func TestResolve(t *testing.T) {
+// The addresses are shapes rather than deployments: resolving a route must not
+// depend on knowing any real ones.
+var (
+	l1Bridge  = common.HexToAddress("0x1111111111111111111111111111111111111111")
+	messenger = common.HexToAddress("0x2222222222222222222222222222222222222222")
+	portal    = common.HexToAddress("0x3333333333333333333333333333333333333333")
+)
+
+var errRPC = errors.New("node unreachable")
+
+// sel is the four-byte selector for a signature, computed the same way the
+// discovery code computes it.
+func sel(sig string) []byte {
+	return crypto.Keccak256([]byte(sig))[:4]
+}
+
+// rollup is a fake serving an OP Stack L2 whose L1 bridge is at bridgeAddr.
+func rollup(bridgeAddr common.Address) *fake.Client {
+	c := &fake.Client{}
+	c.SetCode(opstack.L2StandardBridgePredeploy, []byte{0x60})
+	c.SetCode(opstack.L2ToL1MessagePasserPredeploy, []byte{0x60})
+	c.SetCall(opstack.L2StandardBridgePredeploy, sel("otherBridge()"), word(bridgeAddr))
+	return c
+}
+
+// settlementLayer is a fake serving the L1 that rollup settles to.
+func settlementLayer() *fake.Client {
+	c := &fake.Client{}
+	c.SetCode(l1Bridge, []byte{0x60})
+	c.SetCode(messenger, []byte{0x60})
+	c.SetCode(portal, []byte{0x60})
+	c.SetCall(l1Bridge, sel("messenger()"), word(messenger))
+	c.SetCall(messenger, sel("portal()"), word(portal))
+	return c
+}
+
+// word ABI-encodes an address as a single 32-byte return value.
+func word(a common.Address) []byte {
+	return common.LeftPadBytes(a.Bytes(), 32)
+}
+
+// A same-chain transfer is decided without touching the chain at all: there is
+// no contract involved, so there is nothing to ask.
+func TestResolveSameChainNeedsNoProbing(t *testing.T) {
+	for _, id := range []uint64{1, 10, 137, 42161, 84532, 11155111, 31337} {
+		// Clients that would fail any call. Reaching them would be the bug.
+		ep := Endpoint{ChainID: id, Client: &fake.Client{}}
+
+		got, err := Resolve(context.Background(), ep, ep, Options{})
+		if err != nil {
+			t.Errorf("Resolve(%d, %d): %v", id, id, err)
+			continue
+		}
+		if got.Kind != KindSameChain {
+			t.Errorf("Resolve(%d, %d) = %v, want KindSameChain", id, id, got.Kind)
+		}
+		if got.Addrs != (opstack.Addresses{}) {
+			t.Errorf("same-chain carried bridge addresses: %+v", got.Addrs)
+		}
+	}
+}
+
+// An L1 paired with a rollup resolves in both directions, and carries the
+// addresses discovery found rather than any this package knows.
+func TestResolveBridgeRoutes(t *testing.T) {
 	const (
-		eth  = config.ChainIDEthSepolia
-		base = config.ChainIDBaseSepolia
+		l1ChainID = 11155111
+		l2ChainID = 11155420
 	)
 
 	tests := []struct {
 		name     string
-		src, dst uint64
+		src, dst Endpoint
 		want     Kind
 	}{
-		{"eth to base is a deposit", eth, base, KindDeposit},
-		{"base to eth initiates a withdrawal", base, eth, KindWithdrawInitiate},
-		{"eth to eth is same-chain", eth, eth, KindSameChain},
-		{"base to base is same-chain", base, base, KindSameChain},
+		{
+			name: "L1 to its rollup is a deposit",
+			src:  Endpoint{ChainID: l1ChainID, Client: settlementLayer()},
+			dst:  Endpoint{ChainID: l2ChainID, Client: rollup(l1Bridge)},
+			want: KindDeposit,
+		},
+		{
+			name: "the rollup back to its L1 initiates a withdrawal",
+			src:  Endpoint{ChainID: l2ChainID, Client: rollup(l1Bridge)},
+			dst:  Endpoint{ChainID: l1ChainID, Client: settlementLayer()},
+			want: KindWithdrawInitiate,
+		},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := Resolve(tc.src, tc.dst)
+			got, err := Resolve(context.Background(), tc.src, tc.dst, Options{})
 			if err != nil {
-				t.Fatalf("Resolve(%d, %d): %v", tc.src, tc.dst, err)
+				t.Fatalf("Resolve: %v", err)
 			}
-			if got != tc.want {
-				t.Errorf("Resolve(%d, %d) = %v, want %v", tc.src, tc.dst, got, tc.want)
+			if got.Kind != tc.want {
+				t.Errorf("Kind = %v, want %v", got.Kind, tc.want)
+			}
+			want := opstack.Addresses{
+				L1StandardBridge: l1Bridge,
+				L2StandardBridge: opstack.L2StandardBridgePredeploy,
+				OptimismPortal:   portal,
+			}
+			if got.Addrs != want {
+				t.Errorf("Addrs = %+v, want %+v", got.Addrs, want)
 			}
 		})
 	}
 }
 
-func TestResolveUnsupported(t *testing.T) {
-	tests := []struct {
-		name     string
-		src, dst uint64
-	}{
-		{"mainnet to base sepolia", 1, config.ChainIDBaseSepolia},
-		{"base sepolia to mainnet", config.ChainIDBaseSepolia, 1},
-		// Equal but unsupported must not slip through the same-chain arm.
-		{"same unsupported chain", 1, 1},
-		{"two zeroes", 0, 0},
+// Two rollups is the case most likely to be tried by mistake, so the refusal
+// has to say why rather than just no.
+func TestResolveRejectsL2ToL2(t *testing.T) {
+	src := Endpoint{ChainID: 84532, Client: rollup(l1Bridge)}
+	dst := Endpoint{ChainID: 11155420, Client: rollup(l1Bridge)}
+
+	got, err := Resolve(context.Background(), src, dst, Options{})
+	if !errors.Is(err, ErrUnsupportedRoute) {
+		t.Fatalf("error = %v, want ErrUnsupportedRoute", err)
+	}
+	if got.Kind != KindUnknown {
+		t.Errorf("Kind = %v, want KindUnknown", got.Kind)
+	}
+	for _, want := range []string{"84532", "11155420", "L1 they share", "third-party message protocol"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not explain %q", err, want)
+		}
+	}
+}
+
+// Polygon to Arbitrum: two real chains, neither of them a rollup this tool can
+// bridge. The error has to name the capability that was missing.
+func TestResolveRejectsTwoNonRollups(t *testing.T) {
+	src := Endpoint{ChainID: 137, Client: &fake.Client{}}
+	dst := Endpoint{ChainID: 42161, Client: &fake.Client{}}
+
+	_, err := Resolve(context.Background(), src, dst, Options{})
+	if !errors.Is(err, ErrUnsupportedRoute) {
+		t.Fatalf("error = %v, want ErrUnsupportedRoute", err)
+	}
+	for _, want := range []string{"137", "42161", "neither chain is an OP Stack L2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not explain %q", err, want)
+		}
+	}
+}
+
+// A rollup whose L1 is not the chain it was paired with is not a route, and the
+// failure belongs to discovery rather than to the classification.
+func TestResolveRejectsAMismatchedPair(t *testing.T) {
+	src := Endpoint{ChainID: 11155111, Client: &fake.Client{}} // an L1 that has never heard of it
+	dst := Endpoint{ChainID: 7777777, Client: rollup(l1Bridge)}
+
+	if _, err := Resolve(context.Background(), src, dst, Options{}); !errors.Is(err, opstack.ErrNotPaired) {
+		t.Fatalf("error = %v, want opstack.ErrNotPaired", err)
 	}
 
+	// And the same in the withdrawal direction.
+	if _, err := Resolve(context.Background(), dst, src, Options{}); !errors.Is(err, opstack.ErrNotPaired) {
+		t.Fatalf("reversed: error = %v, want opstack.ErrNotPaired", err)
+	}
+}
+
+// A node that cannot be read is not an answer about capability, so it is
+// reported rather than turned into "unsupported".
+func TestResolvePropagatesRPCFailures(t *testing.T) {
+	broken := &fake.Client{}
+	broken.FailCode(opstack.L2StandardBridgePredeploy, errRPC)
+
+	tests := []struct {
+		name     string
+		src, dst Endpoint
+	}{
+		{
+			name: "the source cannot be read",
+			src:  Endpoint{ChainID: 1, Client: broken},
+			dst:  Endpoint{ChainID: 2, Client: &fake.Client{}},
+		},
+		{
+			name: "the destination cannot be read",
+			src:  Endpoint{ChainID: 1, Client: &fake.Client{}},
+			dst:  Endpoint{ChainID: 2, Client: broken},
+		},
+	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := Resolve(tc.src, tc.dst)
-			if !errors.Is(err, ErrUnsupportedRoute) {
-				t.Fatalf("Resolve(%d, %d) error = %v, want ErrUnsupportedRoute", tc.src, tc.dst, err)
-			}
-			if got != KindUnknown {
-				t.Errorf("Resolve(%d, %d) = %v, want KindUnknown", tc.src, tc.dst, got)
-			}
-			if !strings.Contains(err.Error(), "->") {
-				t.Errorf("error %q should name the offending pair", err)
+			if _, err := Resolve(context.Background(), tc.src, tc.dst, Options{}); !errors.Is(err, errRPC) {
+				t.Fatalf("error = %v, want the RPC failure", err)
 			}
 		})
 	}
@@ -84,8 +223,155 @@ func TestKindString(t *testing.T) {
 	}
 }
 
-func TestErrNotImplementedIsDistinct(t *testing.T) {
-	if errors.Is(ErrNotImplemented, ErrUnsupportedRoute) {
-		t.Error("ErrNotImplemented must not match ErrUnsupportedRoute: an unimplemented route is recognised, an unsupported one is not")
+// The precedence is override, then discovery, then the vendored snapshot. Each
+// step has to be visible in the Sources, because an operator about to move
+// value should be able to see whether the chain was actually asked.
+func TestResolveAddressPrecedence(t *testing.T) {
+	const l1ChainID = 11155111
+
+	var (
+		overrideBridge = common.HexToAddress("0x00000000000000000000000000000000000000a1")
+		overridePortal = common.HexToAddress("0x00000000000000000000000000000000000000a2")
+		registryBridge = common.HexToAddress("0x00000000000000000000000000000000000000b1")
+		registryPortal = common.HexToAddress("0x00000000000000000000000000000000000000b2")
+	)
+
+	snapshot := func(l1, l2 uint64) (opstack.Addresses, bool) {
+		if l1 != l1ChainID {
+			return opstack.Addresses{}, false
+		}
+		return opstack.Addresses{
+			L1StandardBridge: registryBridge,
+			L2StandardBridge: opstack.L2StandardBridgePredeploy,
+			OptimismPortal:   registryPortal,
+		}, true
+	}
+
+	// An L1 that cannot be read at all, so discovery has to fail.
+	unreachable := &fake.Client{}
+	unreachable.FailCode(l1Bridge, errRPC)
+
+	// Each case gets its own rollup ID, because the discovery cache is keyed by
+	// chain pair and lives for the process: reusing one would let an earlier
+	// case answer for a later one.
+	tests := []struct {
+		name        string
+		l2ChainID   uint64
+		l1Client    *fake.Client
+		opts        Options
+		wantAddrs   opstack.Addresses
+		wantSources Sources
+	}{
+		{
+			name:      "discovery when nothing else is configured",
+			l2ChainID: 70000,
+			l1Client:  settlementLayer(),
+			opts:      Options{Fallback: snapshot},
+			wantAddrs: opstack.Addresses{
+				L1StandardBridge: l1Bridge,
+				L2StandardBridge: opstack.L2StandardBridgePredeploy,
+				OptimismPortal:   portal,
+			},
+			wantSources: all(SourceDiscovery),
+		},
+		{
+			name:      "the snapshot answers only when discovery cannot",
+			l2ChainID: 70001,
+			l1Client:  unreachable,
+			opts:      Options{Fallback: snapshot},
+			wantAddrs: opstack.Addresses{
+				L1StandardBridge: registryBridge,
+				L2StandardBridge: opstack.L2StandardBridgePredeploy,
+				OptimismPortal:   registryPortal,
+			},
+			wantSources: all(SourceRegistry),
+		},
+		{
+			name:      "a complete override skips the chain entirely",
+			l2ChainID: 70002,
+			l1Client:  unreachable,
+			opts: Options{Overrides: opstack.Addresses{
+				L1StandardBridge: overrideBridge,
+				L2StandardBridge: opstack.L2StandardBridgePredeploy,
+				OptimismPortal:   overridePortal,
+			}},
+			wantAddrs: opstack.Addresses{
+				L1StandardBridge: overrideBridge,
+				L2StandardBridge: opstack.L2StandardBridgePredeploy,
+				OptimismPortal:   overridePortal,
+			},
+			wantSources: all(SourceOverride),
+		},
+		{
+			name:      "a partial override is laid over discovery",
+			l2ChainID: 70003,
+			l1Client:  settlementLayer(),
+			opts:      Options{Overrides: opstack.Addresses{OptimismPortal: overridePortal}},
+			wantAddrs: opstack.Addresses{
+				L1StandardBridge: l1Bridge,
+				L2StandardBridge: opstack.L2StandardBridgePredeploy,
+				OptimismPortal:   overridePortal,
+			},
+			wantSources: Sources{
+				L1StandardBridge: SourceDiscovery,
+				L2StandardBridge: SourceDiscovery,
+				OptimismPortal:   SourceOverride,
+			},
+		},
+		{
+			name:      "every override is applied",
+			l2ChainID: 70004,
+			l1Client:  settlementLayer(),
+			opts: Options{Overrides: opstack.Addresses{
+				L1StandardBridge: overrideBridge,
+				L2StandardBridge: overrideBridge,
+			}},
+			wantAddrs: opstack.Addresses{
+				L1StandardBridge: overrideBridge,
+				L2StandardBridge: overrideBridge,
+				OptimismPortal:   portal,
+			},
+			wantSources: Sources{
+				L1StandardBridge: SourceOverride,
+				L2StandardBridge: SourceOverride,
+				OptimismPortal:   SourceDiscovery,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// A fresh L2 chain ID per case, so the discovery cache from one
+			// case cannot answer for another.
+			src := Endpoint{ChainID: l1ChainID, Client: tc.l1Client}
+			dst := Endpoint{ChainID: tc.l2ChainID, Client: rollup(l1Bridge)}
+
+			got, err := Resolve(context.Background(), src, dst, tc.opts)
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if got.Addrs != tc.wantAddrs {
+				t.Errorf("Addrs = %+v, want %+v", got.Addrs, tc.wantAddrs)
+			}
+			if got.Sources != tc.wantSources {
+				t.Errorf("Sources = %+v, want %+v", got.Sources, tc.wantSources)
+			}
+		})
+	}
+}
+
+// When discovery fails and the snapshot has no row either, the error the
+// operator sees is discovery's: it says what could not be read, where the
+// snapshot can only say it had nothing.
+func TestResolveReportsTheDiscoveryFailureWhenTheSnapshotIsEmpty(t *testing.T) {
+	unreachable := &fake.Client{}
+	unreachable.FailCode(l1Bridge, errRPC)
+
+	src := Endpoint{ChainID: 11155111, Client: unreachable}
+	dst := Endpoint{ChainID: 5555555, Client: rollup(l1Bridge)}
+
+	empty := func(uint64, uint64) (opstack.Addresses, bool) { return opstack.Addresses{}, false }
+	if _, err := Resolve(context.Background(), src, dst, Options{Fallback: empty}); !errors.Is(err, errRPC) {
+		t.Fatalf("error = %v, want the discovery failure", err)
 	}
 }

@@ -5,7 +5,6 @@ package e2e
 import (
 	"context"
 	"encoding/json"
-	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,10 +14,8 @@ import (
 
 	"github.com/pigfox/eth-bridge-go/internal/bridge"
 	"github.com/pigfox/eth-bridge-go/internal/config"
+	"github.com/pigfox/eth-bridge-go/internal/registry"
 )
-
-// withdrawAmount is the value withdrawn by T4.
-var withdrawAmount = big.NewInt(10_000_000_000_000) // 0.00001 ETH
 
 // T4: a real L2 to L1 withdrawal, initiated only.
 //
@@ -28,50 +25,37 @@ var withdrawAmount = big.NewInt(10_000_000_000_000) // 0.00001 ETH
 // they can be read from a week later. It does not assert anything arrives on
 // L1, because nothing will for about seven days and this tool does not prove or
 // finalize.
-func TestT4WithdrawInitiateBaseSepoliaToEthSepolia(t *testing.T) {
-	requireEnv(t,
-		config.EnvSourceAddr, config.EnvSourcePK, config.EnvDestAddr,
-		config.EnvL2RPCURL,
-	)
+func TestT4WithdrawInitiate(t *testing.T) {
+	requireCredentials(t)
+	pair := livePair(t)
 
 	dir := t.TempDir()
-	cfg, err := config.Load(func(k string) string {
-		switch k {
-		case config.EnvSourceChainID:
-			return strconvUint(config.ChainIDBaseSepolia)
-		case config.EnvDestChainID:
-			return strconvUint(config.ChainIDEthSepolia)
-		case config.EnvL1RPCURL:
-			// A withdrawal only touches L2, but config demands an endpoint for
-			// every chain the route names.
-			if v := os.Getenv(k); v != "" {
-				return v
-			}
-			return "https://ethereum-sepolia-rpc.publicnode.com"
-		case config.EnvWithdrawalsDir:
-			return dir
-		default:
-			return os.Getenv(k)
-		}
+	cfg := loadConfig(t, pair.l2ID, pair.l2RPC, pair.l1ID, pair.l1RPC, map[string]string{
+		config.EnvWithdrawalsDir: dir,
 	})
-	if err != nil {
-		t.Fatalf("config.Load: %v", err)
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), e2eTimeout)
 	defer cancel()
 
-	l2 := dialOrFail(t, ctx, cfg, config.ChainIDBaseSepolia)
+	l2 := dialOrFail(t, ctx, cfg, pair.l2ID)
 	defer l2.Close()
+	l1 := dialOrFail(t, ctx, cfg, pair.l1ID)
+	defer l1.Close()
+
+	// Resolving in this direction is its own assertion: the same pair has to
+	// classify as a withdrawal when the rollup is the source, and produce the
+	// same addresses it produced for the deposit.
+	rt := resolveLive(t, ctx, cfg, l2, l1)
 
 	before := balance(t, ctx, l2, cfg)
-	t.Logf("L2 balance before: %s wei", before)
+	t.Logf("chain %d balance before: %s wei", pair.l2ID, before)
 	if before.Cmp(withdrawAmount) <= 0 {
-		t.Skipf("%s holds %s wei on Base Sepolia, not enough to withdraw %s wei plus gas",
-			cfg.SourceAddr.Hex(), before, withdrawAmount)
+		t.Skipf("%s holds %s wei on chain %d, not enough to withdraw %s wei plus gas",
+			cfg.SourceAddr.Hex(), before, pair.l2ID, withdrawAmount)
 	}
 
-	b := bridge.New(cfg, l2, l2,
+	b := bridge.New(cfg, l2, l1,
+		bridge.WithL2StandardBridge(rt.Addrs.L2StandardBridge),
 		bridge.WithConfirmTimeout(e2eTimeout),
 		bridge.WithPollInterval(pollInteval),
 		bridge.WithWithdrawalsDir(dir),
@@ -79,7 +63,7 @@ func TestT4WithdrawInitiateBaseSepoliaToEthSepolia(t *testing.T) {
 
 	res, err := b.WithdrawInitiate(ctx, withdrawAmount)
 	if res.SrcTxHash != (common.Hash{}) {
-		t.Logf("L2 tx: https://sepolia.basescan.org/tx/%s", res.SrcTxHash.Hex())
+		t.Logf("L2 tx: %s", registry.ExplorerTx(pair.l2ID, res.SrcTxHash.Hex()))
 	}
 	if err != nil {
 		t.Fatalf("WithdrawInitiate: %v", err)

@@ -32,13 +32,24 @@ export BRIDGE_SOURCE_ADDR="${BRIDGE_SOURCE_ADDR:-${DEMO_DEPLOYER_ADDR:-}}"
 export BRIDGE_DEST_ADDR="${BRIDGE_DEST_ADDR:-${DEMO_DEPLOYER_ADDR:-}}"
 export BRIDGE_SOURCE_PK="${BRIDGE_SOURCE_PK:-${DEMO_DEPLOYER_PK:-}}"
 
-# ZK_NODE_RPC_URL is the Base Sepolia endpoint already configured in pigfox2.
-# There is no Ethereum Sepolia endpoint there, so a public one is the default.
-export BRIDGE_L2_RPC_URL="${BRIDGE_L2_RPC_URL:-${ZK_NODE_RPC_URL:-https://base-sepolia-rpc.publicnode.com}}"
-export BRIDGE_L1_RPC_URL="${BRIDGE_L1_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}"
+# The chain pair the suite runs against. The tests take a settlement layer and
+# an OP Stack rollup and name no network of their own, so pointing them at a
+# different pair is these four variables and nothing else.
+#
+# The default is Ethereum Sepolia and OP Sepolia, chosen because neither the
+# routing nor the address resolution has ever heard of them: a pass on that
+# pair is evidence the tool works on chains it was not built against.
+export BRIDGE_E2E_L1_CHAIN_ID="${BRIDGE_E2E_L1_CHAIN_ID:-11155111}"
+export BRIDGE_E2E_L1_RPC_URL="${BRIDGE_E2E_L1_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}"
+export BRIDGE_E2E_L2_CHAIN_ID="${BRIDGE_E2E_L2_CHAIN_ID:-11155420}"
+export BRIDGE_E2E_L2_RPC_URL="${BRIDGE_E2E_L2_RPC_URL:-https://sepolia.optimism.io}"
+
+echo "== chain pair"
+echo "   L1: chain ${BRIDGE_E2E_L1_CHAIN_ID}"
+echo "   L2: chain ${BRIDGE_E2E_L2_CHAIN_ID}"
 
 echo "== exported (names only)"
-for name in BRIDGE_SOURCE_ADDR BRIDGE_DEST_ADDR BRIDGE_SOURCE_PK BRIDGE_L1_RPC_URL BRIDGE_L2_RPC_URL; do
+for name in BRIDGE_SOURCE_ADDR BRIDGE_DEST_ADDR BRIDGE_SOURCE_PK BRIDGE_E2E_L1_RPC_URL BRIDGE_E2E_L2_RPC_URL; do
   if [ -n "${!name:-}" ]; then
     echo "   $name: set"
   else

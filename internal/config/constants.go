@@ -2,42 +2,19 @@ package config
 
 import "time"
 
-// Chain IDs of the two testnets this tool bridges between. They are named
-// here so that no call site carries a bare numeric literal.
-const (
-	// ChainIDEthSepolia is the Ethereum Sepolia L1 testnet.
-	ChainIDEthSepolia uint64 = 11155111
-	// ChainIDBaseSepolia is the Base Sepolia L2 testnet.
-	ChainIDBaseSepolia uint64 = 84532
-)
-
-// Base Sepolia bridge contracts.
-//
-// Verified against docs.base.org and against the chain itself before the first
-// live deposit: the L1 bridge reports version 2.8.0 and an OTHER_BRIDGE of
-// 0x4200000000000000000000000000000000000010, which is the L2 standard bridge
-// predeploy below.
-const (
-	// L1StandardBridgeSepolia is the Base Sepolia standard bridge, deployed on
-	// Ethereum Sepolia.
-	L1StandardBridgeSepolia = "0xfd0Bf71F60660E2f608ed56e1659C450eB113120"
-	// OptimismPortalSepolia emits the TransactionDeposited event from which the
-	// resulting L2 transaction hash is derived.
-	OptimismPortalSepolia = "0x49f53e41452C74589E85cA1677426Ba426459e85"
-	// L2StandardBridgePredeploy is the L2 side of the standard bridge.
-	L2StandardBridgePredeploy = "0x4200000000000000000000000000000000000010"
-	// L2ToL1MessagePasserPredeploy emits the MessagePassed event that carries
-	// the parameters a withdrawal is later proved with.
-	L2ToL1MessagePasserPredeploy = "0x4200000000000000000000000000000000000016"
-)
-
 // LegacyERC20ETH is the sentinel token address that means "ETH" to
 // L2StandardBridge.withdrawTo.
 //
+// This is one of the two addresses in this tool that are hard-coded and stay
+// that way, because it is a fact about the protocol rather than about any one
+// deployment of it. The other, the predeploy layout, lives in internal/opstack.
+// Every address that identifies a particular chain's bridge is discovered at
+// runtime instead.
+//
 // This is Predeploys.LEGACY_ERC20_ETH. The other sentinel in circulation,
-// 0xEeee...EEeE (Constants.ETHER), is *not* accepted by the bridge deployed on
-// Base Sepolia: an eth_call with it reverts, while this address succeeds. The
-// deployed L2StandardBridge reports version 1.3.0.
+// 0xEeee...EEeE (Constants.ETHER), is *not* accepted by the L2StandardBridge
+// deployed on Base Sepolia: an eth_call with it reverts, while this address
+// succeeds. The deployed bridge there reports version 1.3.0.
 const LegacyERC20ETH = "0xDeadDeAddeAddEAddeadDEaDDEAdDeaDDeAD0000"
 
 // DefaultWithdrawMinGasLimit is the gas reserved for the withdrawal's eventual
@@ -81,10 +58,23 @@ const (
 	EnvDestAddr      = "BRIDGE_DEST_ADDR"
 	EnvSourceChainID = "BRIDGE_SOURCE_CHAIN_ID"
 	EnvDestChainID   = "BRIDGE_DEST_CHAIN_ID"
-	EnvL1RPCURL      = "BRIDGE_L1_RPC_URL"
-	EnvL2RPCURL      = "BRIDGE_L2_RPC_URL"
+	// EnvSourceRPCURL and EnvDestRPCURL are named for the part each endpoint
+	// plays in the transfer, not for its layer. Which side of a bridge route is
+	// the L1 and which is the rollup is discovered from the chains themselves,
+	// so it cannot be a precondition of reading the configuration.
+	EnvSourceRPCURL = "BRIDGE_SOURCE_RPC_URL"
+	EnvDestRPCURL   = "BRIDGE_DEST_RPC_URL"
 	// EnvWithdrawalsDir is optional and defaults to DefaultWithdrawalsDir.
 	EnvWithdrawalsDir = "BRIDGE_WITHDRAWALS_DIR"
+
+	// Address overrides. All optional, and all a last resort: the addresses
+	// are discovered from the chains, and an operator who sets one of these is
+	// asserting something the chain disagrees with or cannot be asked about.
+	// They exist because a chain running contracts this tool cannot read
+	// should be usable by someone who knows the addresses, not blocked.
+	EnvL1StandardBridge = "BRIDGE_L1_STANDARD_BRIDGE_ADDRESS"
+	EnvL2StandardBridge = "BRIDGE_L2_STANDARD_BRIDGE_ADDRESS"
+	EnvOptimismPortal   = "BRIDGE_OPTIMISM_PORTAL_ADDRESS"
 )
 
 // redacted is what stands in for the private key everywhere the configuration

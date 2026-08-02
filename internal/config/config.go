@@ -16,6 +16,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+
+	"github.com/pigfox/eth-bridge-go/internal/opstack"
 )
 
 // ErrMissing is returned when a required environment variable is unset or empty.
@@ -34,13 +36,17 @@ type Config struct {
 	// SourceChainID and DestChainID identify the route.
 	SourceChainID uint64
 	DestChainID   uint64
-	// L1RPCURL and L2RPCURL address the two chains. Only the ones the route
-	// actually needs are required to be set.
-	L1RPCURL string
-	L2RPCURL string
+	// SourceRPCURL and DestRPCURL address the two chains. For a same-chain
+	// route only the source endpoint is required, and DestRPCURL is set to
+	// the same value.
+	SourceRPCURL string
+	DestRPCURL   string
 	// WithdrawalsDir is where initiated withdrawals are recorded. It is
 	// optional and defaults to DefaultWithdrawalsDir.
 	WithdrawalsDir string
+	// Overrides are bridge addresses supplied by the operator. Any that is
+	// left at the zero address is discovered instead.
+	Overrides opstack.Addresses
 
 	// sourceKey is unexported so that it cannot be reached by reflection-based
 	// formatting of the struct from outside this package.
@@ -55,9 +61,9 @@ func (c Config) SourceKey() *ecdsa.PrivateKey { return c.sourceKey }
 // key in the path.
 func (c Config) String() string {
 	return fmt.Sprintf(
-		"Config{SourceAddr:%s DestAddr:%s SourceChainID:%d DestChainID:%d L1RPCURL:%s L2RPCURL:%s SourceKey:%s}",
+		"Config{SourceAddr:%s DestAddr:%s SourceChainID:%d DestChainID:%d SourceRPCURL:%s DestRPCURL:%s SourceKey:%s}",
 		c.SourceAddr.Hex(), c.DestAddr.Hex(), c.SourceChainID, c.DestChainID,
-		redactURL(c.L1RPCURL), redactURL(c.L2RPCURL), redacted,
+		redactURL(c.SourceRPCURL), redactURL(c.DestRPCURL), redacted,
 	)
 }
 
@@ -78,20 +84,20 @@ func redactURL(raw string) string {
 	return scheme + "://" + host + "/" + redacted
 }
 
-// SupportedChainID reports whether the bridge knows the given chain.
-func SupportedChainID(id uint64) bool {
-	return id == ChainIDEthSepolia || id == ChainIDBaseSepolia
-}
-
 // RPCFor returns the RPC URL configured for the given chain ID.
+//
+// The lookup is by the part the chain plays in the configured route rather than
+// by a table of known networks: an endpoint is either the source or the
+// destination, and there is nothing else for it to be.
 func (c Config) RPCFor(chainID uint64) (string, error) {
 	switch chainID {
-	case ChainIDEthSepolia:
-		return c.L1RPCURL, nil
-	case ChainIDBaseSepolia:
-		return c.L2RPCURL, nil
+	case c.SourceChainID:
+		return c.SourceRPCURL, nil
+	case c.DestChainID:
+		return c.DestRPCURL, nil
 	default:
-		return "", fmt.Errorf("%w: no RPC URL configured for chain %d", ErrInvalid, chainID)
+		return "", fmt.Errorf("%w: chain %d is neither the source (%d) nor the destination (%d)",
+			ErrInvalid, chainID, c.SourceChainID, c.DestChainID)
 	}
 }
 
@@ -118,11 +124,49 @@ func Load(getenv func(string) string) (Config, error) {
 	if cfg.sourceKey, err = requireKey(getenv, cfg.SourceAddr); err != nil {
 		return Config{}, err
 	}
-	if cfg.L1RPCURL, cfg.L2RPCURL, err = requireRPCs(getenv, cfg.SourceChainID, cfg.DestChainID); err != nil {
+	if cfg.SourceRPCURL, cfg.DestRPCURL, err = requireRPCs(getenv, cfg.SourceChainID, cfg.DestChainID); err != nil {
+		return Config{}, err
+	}
+	if cfg.Overrides, err = readOverrides(getenv); err != nil {
 		return Config{}, err
 	}
 	cfg.WithdrawalsDir = orDefault(getenv(EnvWithdrawalsDir), DefaultWithdrawalsDir)
 	return cfg, nil
+}
+
+// readOverrides reads the optional bridge address overrides.
+//
+// Each is validated even though each is optional: a variable that is set but
+// malformed is a mistake the operator wants to hear about, and silently
+// ignoring it would fall through to discovery and look like it had worked.
+func readOverrides(getenv func(string) string) (opstack.Addresses, error) {
+	var (
+		out opstack.Addresses
+		err error
+	)
+	if out.L1StandardBridge, err = optionalAddress(getenv, EnvL1StandardBridge); err != nil {
+		return opstack.Addresses{}, err
+	}
+	if out.L2StandardBridge, err = optionalAddress(getenv, EnvL2StandardBridge); err != nil {
+		return opstack.Addresses{}, err
+	}
+	if out.OptimismPortal, err = optionalAddress(getenv, EnvOptimismPortal); err != nil {
+		return opstack.Addresses{}, err
+	}
+	return out, nil
+}
+
+// optionalAddress reads an address that may be absent. An unset variable gives
+// the zero address and no error; a malformed one is an error.
+func optionalAddress(getenv func(string) string, name string) (common.Address, error) {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" {
+		return common.Address{}, nil
+	}
+	if !common.IsHexAddress(raw) {
+		return common.Address{}, fmt.Errorf("%w: %s is not a valid 0x-prefixed address", ErrInvalid, name)
+	}
+	return common.HexToAddress(raw), nil
 }
 
 // orDefault returns the trimmed value, or fallback when it is empty.
@@ -154,7 +198,12 @@ func requireAddress(getenv func(string) string, name string) (common.Address, er
 	return common.HexToAddress(raw), nil
 }
 
-// requireChainID reads a chain ID and checks it against the supported set.
+// requireChainID reads a chain ID.
+//
+// There is no allowlist. A same-chain transfer is an EIP-155 value transfer and
+// works on any EVM chain; whether a *bridge* route is possible between two
+// chains is decided by asking the chains, not by consulting a table here. The
+// one value rejected is zero, which EIP-155 does not assign to any network.
 func requireChainID(getenv func(string) string, name string) (uint64, error) {
 	raw, err := require(getenv, name)
 	if err != nil {
@@ -164,9 +213,8 @@ func requireChainID(getenv func(string) string, name string) (uint64, error) {
 	if parseErr != nil {
 		return 0, fmt.Errorf("%w: %s is not a base-10 unsigned integer", ErrInvalid, name)
 	}
-	if !SupportedChainID(id) {
-		return 0, fmt.Errorf("%w: %s=%d is not a supported chain (want %d or %d)",
-			ErrInvalid, name, id, ChainIDEthSepolia, ChainIDBaseSepolia)
+	if id == 0 {
+		return 0, fmt.Errorf("%w: %s=0 is not a chain ID", ErrInvalid, name)
 	}
 	return id, nil
 }
@@ -195,19 +243,21 @@ func requireKey(getenv func(string) string, want common.Address) (*ecdsa.Private
 }
 
 // requireRPCs demands an RPC URL for each chain the route actually touches, and
-// only for those. A same-chain transfer on L2 has no business failing because
-// no L1 endpoint was configured.
-func requireRPCs(getenv func(string) string, src, dst uint64) (l1, l2 string, err error) {
-	need := func(id uint64) bool { return src == id || dst == id }
-	if need(ChainIDEthSepolia) {
-		if l1, err = require(getenv, EnvL1RPCURL); err != nil {
-			return "", "", err
-		}
+// only for those. A same-chain transfer has no second endpoint to configure, so
+// it does not fail for want of one.
+//
+// When the route does cross chains, both endpoints are mandatory: which of them
+// is the L1 and which is the rollup is not decidable from the chain IDs, so
+// both have to be reachable before the route can be classified at all.
+func requireRPCs(getenv func(string) string, src, dst uint64) (source, dest string, err error) {
+	if source, err = require(getenv, EnvSourceRPCURL); err != nil {
+		return "", "", err
 	}
-	if need(ChainIDBaseSepolia) {
-		if l2, err = require(getenv, EnvL2RPCURL); err != nil {
-			return "", "", err
-		}
+	if src == dst {
+		return source, source, nil
 	}
-	return l1, l2, nil
+	if dest, err = require(getenv, EnvDestRPCURL); err != nil {
+		return "", "", err
+	}
+	return source, dest, nil
 }

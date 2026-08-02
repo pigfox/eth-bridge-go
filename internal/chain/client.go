@@ -42,6 +42,13 @@ type Client interface {
 	TransactionReceipt(ctx context.Context, txHash common.Hash) (*types.Receipt, error)
 	// BalanceAt returns an account balance; a nil block means the latest.
 	BalanceAt(ctx context.Context, account common.Address, blockNumber *big.Int) (*big.Int, error)
+	// CodeAt returns the deployed bytecode at an address, which is empty for
+	// an account that holds no contract. Discovery uses it to tell a chain
+	// that has the OP Stack predeploys from one that does not.
+	CodeAt(ctx context.Context, account common.Address, blockNumber *big.Int) ([]byte, error)
+	// CallContract runs a read-only call. It is how the bridge addresses are
+	// derived from the chains rather than assumed.
+	CallContract(ctx context.Context, call ethereum.CallMsg, blockNumber *big.Int) ([]byte, error)
 	// Close releases the underlying connection.
 	Close()
 }

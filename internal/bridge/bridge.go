@@ -42,6 +42,11 @@ var (
 	// ErrDepositNotCredited means the L1 deposit was mined but the destination
 	// balance on L2 had not moved before the confirm timeout expired.
 	ErrDepositNotCredited = errors.New("deposit not credited on the destination chain")
+	// ErrNoBridgeAddress means a deposit was asked for without an L1 standard
+	// bridge address. That address names one particular rollup and has no
+	// sensible default, so the operation stops here rather than sending the
+	// value to the zero address.
+	ErrNoBridgeAddress = errors.New("no L1 standard bridge address; discovery must supply one")
 )
 
 // WithdrawalWriter records an initiated withdrawal so that it can be proved
@@ -207,12 +212,17 @@ func New(cfg config.Config, src, dst chain.Client, opts ...Option) *Bridger {
 		sleep:          Sleep,
 		sign:           LocalSigner(cfg.SourceKey()),
 
-		l1Bridge:           common.HexToAddress(config.L1StandardBridgeSepolia),
+		// There is no default L1 bridge address. It identifies one particular
+		// rollup, so guessing it is exactly the mistake this tool stopped
+		// making: it is discovered from the chains and passed in, and a Deposit
+		// without one fails rather than sending ETH somewhere plausible.
 		depositMinGasLimit: config.DefaultDepositMinGasLimit,
 		encodeDeposit:      opstack.DepositETHToCalldata,
 		gasMarginPercent:   config.DefaultGasMarginPercent,
 
-		l2Bridge:            common.HexToAddress(config.L2StandardBridgePredeploy),
+		// The L2 side does have a default, because the predeploy address is
+		// identical on every OP Stack chain by specification.
+		l2Bridge:            opstack.L2StandardBridgePredeploy,
 		withdrawMinGasLimit: config.DefaultWithdrawMinGasLimit,
 		encodeWithdraw:      opstack.WithdrawToCalldata,
 		writeWithdrawal:     fileWriter(config.DefaultWithdrawalsDir),
@@ -354,7 +364,7 @@ func (b *Bridger) WaitReceipt(ctx context.Context, c chain.Client, hash common.H
 	}
 }
 
-// Deposit moves ETH from L1 to L2 through the Base Standard Bridge.
+// Deposit moves ETH from an L1 to an OP Stack L2 through the Standard Bridge.
 //
 // It calls L1StandardBridge.depositETHTo with the amount as the transaction
 // value, waits for the L1 receipt, derives the hash of the L2 transaction the
@@ -365,6 +375,9 @@ func (b *Bridger) WaitReceipt(ctx context.Context, c chain.Client, hash common.H
 func (b *Bridger) Deposit(ctx context.Context, amount *big.Int) (Result, error) {
 	if amount == nil || amount.Sign() <= 0 {
 		return Result{}, ErrAmountNotPositive
+	}
+	if b.l1Bridge == (common.Address{}) {
+		return Result{}, ErrNoBridgeAddress
 	}
 	if err := b.verifyChain(ctx, b.src, b.cfg.SourceChainID); err != nil {
 		return Result{}, err

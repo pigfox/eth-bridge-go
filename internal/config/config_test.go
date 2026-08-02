@@ -2,9 +2,11 @@ package config
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -32,7 +34,7 @@ func env(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
 
-// baseEnv is a valid same-chain-on-L2 environment.
+// baseEnv is a valid same-chain environment.
 func baseEnv(t *testing.T) map[string]string {
 	t.Helper()
 	return map[string]string{
@@ -41,11 +43,11 @@ func baseEnv(t *testing.T) map[string]string {
 		EnvDestAddr:      destAddr,
 		EnvSourceChainID: "84532",
 		EnvDestChainID:   "84532",
-		EnvL2RPCURL:      "https://base-sepolia.example/v1/abc123",
+		EnvSourceRPCURL:  "https://base-sepolia.example/v1/abc123",
 	}
 }
 
-func TestLoadSameChainL2(t *testing.T) {
+func TestLoadSameChain(t *testing.T) {
 	cfg, err := Load(env(baseEnv(t)))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -56,12 +58,12 @@ func TestLoadSameChainL2(t *testing.T) {
 	if cfg.DestAddr.Hex() != destAddr {
 		t.Errorf("DestAddr = %s, want %s", cfg.DestAddr.Hex(), destAddr)
 	}
-	if cfg.SourceChainID != ChainIDBaseSepolia || cfg.DestChainID != ChainIDBaseSepolia {
+	if cfg.SourceChainID != 84532 || cfg.DestChainID != 84532 {
 		t.Errorf("chain IDs = %d/%d", cfg.SourceChainID, cfg.DestChainID)
 	}
-	// A same-chain L2 route must not demand an L1 endpoint.
-	if cfg.L1RPCURL != "" {
-		t.Errorf("L1RPCURL = %q, want empty", cfg.L1RPCURL)
+	// A same-chain route has one endpoint, and it stands in for both sides.
+	if cfg.DestRPCURL != cfg.SourceRPCURL {
+		t.Errorf("DestRPCURL = %q, want it to mirror SourceRPCURL %q", cfg.DestRPCURL, cfg.SourceRPCURL)
 	}
 	if cfg.SourceKey() == nil {
 		t.Fatal("SourceKey is nil")
@@ -71,17 +73,43 @@ func TestLoadSameChainL2(t *testing.T) {
 	}
 }
 
-func TestLoadDepositRouteNeedsBothRPCs(t *testing.T) {
+// TestLoadSameChainAcceptsAnyEVMChain is the P1 claim in one test: a same-chain
+// transfer needs no bridge contract and no pairing, so no chain ID is special.
+func TestLoadSameChainAcceptsAnyEVMChain(t *testing.T) {
+	for _, id := range []uint64{1, 10, 137, 42161, 84532, 11155111, 31337} {
+		m := baseEnv(t)
+		m[EnvSourceChainID] = strconv.FormatUint(id, 10)
+		m[EnvDestChainID] = strconv.FormatUint(id, 10)
+
+		cfg, err := Load(env(m))
+		if err != nil {
+			t.Errorf("Load for chain %d: %v", id, err)
+			continue
+		}
+		if cfg.SourceChainID != id || cfg.DestChainID != id {
+			t.Errorf("chain IDs = %d/%d, want %d", cfg.SourceChainID, cfg.DestChainID, id)
+		}
+		rpc, err := cfg.RPCFor(id)
+		if err != nil || rpc != m[EnvSourceRPCURL] {
+			t.Errorf("RPCFor(%d) = %q, %v", id, rpc, err)
+		}
+	}
+}
+
+func TestLoadCrossChainRouteNeedsBothRPCs(t *testing.T) {
 	m := baseEnv(t)
 	m[EnvSourceChainID] = "11155111"
-	m[EnvL1RPCURL] = "https://eth-sepolia.example/v1/xyz"
+	m[EnvDestRPCURL] = "https://l2.example/v1/xyz"
 
 	cfg, err := Load(env(m))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.L1RPCURL == "" || cfg.L2RPCURL == "" {
-		t.Errorf("both RPC URLs should be set, got %q / %q", cfg.L1RPCURL, cfg.L2RPCURL)
+	if cfg.SourceRPCURL == "" || cfg.DestRPCURL == "" {
+		t.Errorf("both RPC URLs should be set, got %q / %q", cfg.SourceRPCURL, cfg.DestRPCURL)
+	}
+	if cfg.SourceRPCURL == cfg.DestRPCURL {
+		t.Error("a cross-chain route must not collapse its two endpoints")
 	}
 }
 
@@ -99,15 +127,15 @@ func TestLoadErrors(t *testing.T) {
 		{"invalid dest addr", func(m map[string]string) { m[EnvDestAddr] = "not-an-address" }, ErrInvalid, EnvDestAddr},
 		{"missing source chain", func(m map[string]string) { delete(m, EnvSourceChainID) }, ErrMissing, EnvSourceChainID},
 		{"unparseable source chain", func(m map[string]string) { m[EnvSourceChainID] = "eleven" }, ErrInvalid, EnvSourceChainID},
-		{"unsupported source chain", func(m map[string]string) { m[EnvSourceChainID] = "1" }, ErrInvalid, "not a supported chain"},
+		{"zero source chain", func(m map[string]string) { m[EnvSourceChainID] = "0" }, ErrInvalid, "is not a chain ID"},
 		{"missing dest chain", func(m map[string]string) { delete(m, EnvDestChainID) }, ErrMissing, EnvDestChainID},
 		{"missing pk", func(m map[string]string) { delete(m, EnvSourcePK) }, ErrMissing, EnvSourcePK},
 		{"invalid pk", func(m map[string]string) { m[EnvSourcePK] = "0xzzzz" }, ErrInvalid, EnvSourcePK},
 		{"pk mismatch", func(m map[string]string) { m[EnvSourcePK] = otherPK }, ErrInvalid, "derives to"},
-		{"missing l2 rpc", func(m map[string]string) { delete(m, EnvL2RPCURL) }, ErrMissing, EnvL2RPCURL},
-		{"missing l1 rpc", func(m map[string]string) {
+		{"missing source rpc", func(m map[string]string) { delete(m, EnvSourceRPCURL) }, ErrMissing, EnvSourceRPCURL},
+		{"missing dest rpc on a cross-chain route", func(m map[string]string) {
 			m[EnvSourceChainID] = "11155111"
-		}, ErrMissing, EnvL1RPCURL},
+		}, ErrMissing, EnvDestRPCURL},
 	}
 
 	for _, tc := range tests {
@@ -188,13 +216,13 @@ func TestRedactURL(t *testing.T) {
 }
 
 func TestRPCFor(t *testing.T) {
-	cfg := Config{L1RPCURL: "l1", L2RPCURL: "l2"}
+	cfg := Config{SourceChainID: 42161, DestChainID: 137, SourceRPCURL: "src", DestRPCURL: "dst"}
 
-	if got, err := cfg.RPCFor(ChainIDEthSepolia); err != nil || got != "l1" {
-		t.Errorf("RPCFor(eth) = %q, %v", got, err)
+	if got, err := cfg.RPCFor(42161); err != nil || got != "src" {
+		t.Errorf("RPCFor(source) = %q, %v", got, err)
 	}
-	if got, err := cfg.RPCFor(ChainIDBaseSepolia); err != nil || got != "l2" {
-		t.Errorf("RPCFor(base) = %q, %v", got, err)
+	if got, err := cfg.RPCFor(137); err != nil || got != "dst" {
+		t.Errorf("RPCFor(dest) = %q, %v", got, err)
 	}
 	got, err := cfg.RPCFor(1)
 	if !errors.Is(err, ErrInvalid) {
@@ -202,19 +230,6 @@ func TestRPCFor(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("RPCFor(1) = %q, want empty", got)
-	}
-}
-
-func TestSupportedChainID(t *testing.T) {
-	for _, id := range []uint64{ChainIDEthSepolia, ChainIDBaseSepolia} {
-		if !SupportedChainID(id) {
-			t.Errorf("SupportedChainID(%d) = false, want true", id)
-		}
-	}
-	for _, id := range []uint64{0, 1, 10, 8453} {
-		if SupportedChainID(id) {
-			t.Errorf("SupportedChainID(%d) = true, want false", id)
-		}
 	}
 }
 
@@ -246,5 +261,64 @@ func TestWithdrawalsDirDefaultsAndOverrides(t *testing.T) {
 	}
 	if cfg.WithdrawalsDir != DefaultWithdrawalsDir {
 		t.Errorf("WithdrawalsDir = %q, want the default", cfg.WithdrawalsDir)
+	}
+}
+
+// The address overrides are optional, and a malformed one is louder than a
+// missing one: silently ignoring it would fall through to discovery and look
+// like it had been honoured.
+func TestLoadAddressOverrides(t *testing.T) {
+	const (
+		l1Bridge = "0xfd0Bf71F60660E2f608ed56e1659C450eB113120"
+		l2Bridge = "0x4200000000000000000000000000000000000010"
+		portal   = "0x49f53e41452C74589E85cA1677426Ba426459e85"
+	)
+
+	// Absent by default, and absent is the zero address rather than an error.
+	cfg, err := Load(env(baseEnv(t)))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Overrides.L1StandardBridge != (common.Address{}) ||
+		cfg.Overrides.L2StandardBridge != (common.Address{}) ||
+		cfg.Overrides.OptimismPortal != (common.Address{}) {
+		t.Errorf("Overrides = %+v, want all zero when nothing is set", cfg.Overrides)
+	}
+
+	m := baseEnv(t)
+	m[EnvL1StandardBridge] = l1Bridge
+	m[EnvL2StandardBridge] = "  " + l2Bridge + "  " // whitespace is trimmed
+	m[EnvOptimismPortal] = portal
+
+	cfg, err = Load(env(m))
+	if err != nil {
+		t.Fatalf("Load with overrides: %v", err)
+	}
+	if cfg.Overrides.L1StandardBridge != common.HexToAddress(l1Bridge) {
+		t.Errorf("L1StandardBridge = %s, want %s", cfg.Overrides.L1StandardBridge.Hex(), l1Bridge)
+	}
+	if cfg.Overrides.L2StandardBridge != common.HexToAddress(l2Bridge) {
+		t.Errorf("L2StandardBridge = %s, want %s", cfg.Overrides.L2StandardBridge.Hex(), l2Bridge)
+	}
+	if cfg.Overrides.OptimismPortal != common.HexToAddress(portal) {
+		t.Errorf("OptimismPortal = %s, want %s", cfg.Overrides.OptimismPortal.Hex(), portal)
+	}
+	if !cfg.Overrides.Complete() {
+		t.Error("a full set of overrides did not report complete")
+	}
+}
+
+func TestLoadRejectsMalformedOverrides(t *testing.T) {
+	for _, name := range []string{EnvL1StandardBridge, EnvL2StandardBridge, EnvOptimismPortal} {
+		m := baseEnv(t)
+		m[name] = "0xnot-an-address"
+
+		_, err := Load(env(m))
+		if !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: error = %v, want ErrInvalid", name, err)
+		}
+		if err != nil && !strings.Contains(err.Error(), name) {
+			t.Errorf("error %q does not name %s", err, name)
+		}
 	}
 }

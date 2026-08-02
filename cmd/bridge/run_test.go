@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/pigfox/eth-bridge-go/internal/bridge"
 	"github.com/pigfox/eth-bridge-go/internal/chain"
@@ -38,8 +40,41 @@ func baseEnv() map[string]string {
 		config.EnvDestAddr:      destAddr,
 		config.EnvSourceChainID: "84532",
 		config.EnvDestChainID:   "84532",
-		config.EnvL2RPCURL:      "https://base-sepolia.example",
+		config.EnvSourceRPCURL:  "https://base-sepolia.example",
 	}
+}
+
+// Addresses discovery is expected to find. They are made up: the command must
+// take whatever the chains say and must not carry any of its own.
+var (
+	discoveredL1Bridge  = common.HexToAddress("0xB41d6e0000000000000000000000000000000001")
+	discoveredMessenger = common.HexToAddress("0x0e55a6e0000000000000000000000000000000002")
+	discoveredPortal    = common.HexToAddress("0x9021a10000000000000000000000000000000003")
+)
+
+// sel is the four-byte selector for a function signature.
+func sel(sig string) []byte { return crypto.Keccak256([]byte(sig))[:4] }
+
+// addrWord ABI-encodes an address as a single 32-byte return value.
+func addrWord(a common.Address) []byte { return common.LeftPadBytes(a.Bytes(), 32) }
+
+// asRollup makes a fake answer as an OP Stack L2 whose L1 bridge is the one
+// above, so that route.Resolve classifies it as the rollup side.
+func asRollup(c *fake.Client) *fake.Client {
+	c.SetCode(opstack.L2StandardBridgePredeploy, []byte{0x60})
+	c.SetCode(opstack.L2ToL1MessagePasserPredeploy, []byte{0x60})
+	c.SetCall(opstack.L2StandardBridgePredeploy, sel("otherBridge()"), addrWord(discoveredL1Bridge))
+	return c
+}
+
+// asSettlementLayer makes a fake answer as the L1 that asRollup settles to.
+func asSettlementLayer(c *fake.Client) *fake.Client {
+	c.SetCode(discoveredL1Bridge, []byte{0x60})
+	c.SetCode(discoveredMessenger, []byte{0x60})
+	c.SetCode(discoveredPortal, []byte{0x60})
+	c.SetCall(discoveredL1Bridge, sel("messenger()"), addrWord(discoveredMessenger))
+	c.SetCall(discoveredMessenger, sel("portal()"), addrWord(discoveredPortal))
+	return c
 }
 
 // withEnv installs a getenv over m for the duration of the test.
@@ -222,19 +257,23 @@ func TestDispatchWithdrawalDialFailure(t *testing.T) {
 	withDial(t, func(context.Context, string) (chain.Client, error) { return nil, errBoom })
 
 	cfg := config.Config{
-		SourceChainID: config.ChainIDBaseSepolia,
-		DestChainID:   config.ChainIDEthSepolia,
-		L1RPCURL:      "l1",
-		L2RPCURL:      "l2",
+		SourceChainID: 84532,
+		DestChainID:   11155111,
+		SourceRPCURL:  "l1",
+		DestRPCURL:    "l2",
 	}
-	if _, err := dispatch(context.Background(), cfg, big.NewInt(1)); !errors.Is(err, errBoom) {
+	if _, err := dispatch(context.Background(), cfg, big.NewInt(1), io.Discard); !errors.Is(err, errBoom) {
 		t.Fatalf("error = %v, want errBoom", err)
 	}
 }
 
+// Two chains that are real and reachable, and are not a rollup pair, are
+// refused after being asked rather than before.
 func TestDispatchUnsupportedRoute(t *testing.T) {
-	cfg := config.Config{SourceChainID: 1, DestChainID: 137}
-	_, err := dispatch(context.Background(), cfg, big.NewInt(1))
+	withDial(t, func(context.Context, string) (chain.Client, error) { return &fake.Client{}, nil })
+
+	cfg := config.Config{SourceChainID: 1, DestChainID: 137, SourceRPCURL: "src", DestRPCURL: "dst"}
+	_, err := dispatch(context.Background(), cfg, big.NewInt(1), io.Discard)
 	if !errors.Is(err, route.ErrUnsupportedRoute) {
 		t.Fatalf("error = %v, want route.ErrUnsupportedRoute", err)
 	}
@@ -295,8 +334,8 @@ func TestExplorerURL(t *testing.T) {
 		chainID uint64
 		want    string
 	}{
-		{config.ChainIDEthSepolia, "https://sepolia.etherscan.io/tx/" + hash},
-		{config.ChainIDBaseSepolia, "https://sepolia.basescan.org/tx/" + hash},
+		{11155111, "https://sepolia.etherscan.io/tx/" + hash},
+		{84532, "https://sepolia.basescan.org/tx/" + hash},
 		{1, hash},
 	}
 	for _, tc := range tests {
@@ -320,7 +359,8 @@ func TestTestAddrMatchesTestPK(t *testing.T) {
 func depositEnv() map[string]string {
 	m := baseEnv()
 	m[config.EnvSourceChainID] = "11155111"
-	m[config.EnvL1RPCURL] = "https://eth-sepolia.example"
+	m[config.EnvSourceRPCURL] = "https://eth-sepolia.example"
+	m[config.EnvDestRPCURL] = "https://base-sepolia.example"
 	return m
 }
 
@@ -367,8 +407,8 @@ func TestSendDepositReportsBothHashesAndTheCredit(t *testing.T) {
 	withEnv(t, depositEnv())
 	amount := big.NewInt(500_000_000_000_000) // 0.0005 ETH
 
-	l1 := depositL1Client(amount)
-	l2 := &fake.Client{}
+	l1 := asSettlementLayer(depositL1Client(amount))
+	l2 := asRollup(&fake.Client{})
 	l2.PushChainID(big.NewInt(84532), nil)
 	l2.PushBalance(big.NewInt(0), nil)            // before
 	l2.PushBalance(new(big.Int).Set(amount), nil) // credited
@@ -407,8 +447,8 @@ func TestSendDepositReportsBothHashesAndTheCredit(t *testing.T) {
 func TestSendDepositReportsPartialResultOnFailure(t *testing.T) {
 	withEnv(t, depositEnv())
 
-	l1 := depositL1Client(big.NewInt(1))
-	l2 := &fake.Client{}
+	l1 := asSettlementLayer(depositL1Client(big.NewInt(1)))
+	l2 := asRollup(&fake.Client{})
 	l2.PushChainID(big.NewInt(84532), nil)
 	l2.PushBalance(big.NewInt(0), nil)
 	l2.PushBalance(nil, errBoom) // the credit poll fails
@@ -434,10 +474,10 @@ func TestSendDepositReportsPartialResultOnFailure(t *testing.T) {
 
 func TestDispatchDepositDialFailures(t *testing.T) {
 	cfg := config.Config{
-		SourceChainID: config.ChainIDEthSepolia,
-		DestChainID:   config.ChainIDBaseSepolia,
-		L1RPCURL:      "l1",
-		L2RPCURL:      "l2",
+		SourceChainID: 11155111,
+		DestChainID:   84532,
+		SourceRPCURL:  "l1",
+		DestRPCURL:    "l2",
 	}
 
 	tests := []struct {
@@ -455,7 +495,7 @@ func TestDispatchDepositDialFailures(t *testing.T) {
 				}
 				return &fake.Client{}, nil
 			})
-			if _, err := dispatch(context.Background(), cfg, big.NewInt(1)); !errors.Is(err, errBoom) {
+			if _, err := dispatch(context.Background(), cfg, big.NewInt(1), io.Discard); !errors.Is(err, errBoom) {
 				t.Fatalf("error = %v, want errBoom", err)
 			}
 		})
@@ -476,7 +516,7 @@ func TestReportIsSilentWithoutATransaction(t *testing.T) {
 func withdrawEnv() map[string]string {
 	m := baseEnv()
 	m[config.EnvDestChainID] = "11155111"
-	m[config.EnvL1RPCURL] = "https://eth-sepolia.example"
+	m[config.EnvDestRPCURL] = "https://eth-sepolia.example"
 	return m
 }
 
@@ -495,7 +535,7 @@ func TestSendWithdrawalPrintsTheFinalizationNotice(t *testing.T) {
 	data = append(data, common.HexToHash("0xfeed").Bytes()...)
 	data = append(data, w(big.NewInt(0))...)
 
-	c := &fake.Client{}
+	c := asRollup(&fake.Client{})
 	c.PushChainID(big.NewInt(84532), nil)
 	c.PushNonce(1, nil)
 	c.PushTipCap(big.NewInt(1_000_000), nil)
@@ -518,7 +558,16 @@ func TestSendWithdrawalPrintsTheFinalizationNotice(t *testing.T) {
 		}},
 	}, nil)
 
-	withDial(t, func(context.Context, string) (chain.Client, error) { return c, nil })
+	// The withdrawal route has two endpoints even though only the L2 is
+	// written to, because classifying it means asking both chains what they
+	// are.
+	l1 := asSettlementLayer(&fake.Client{})
+	withDial(t, func(_ context.Context, rpc string) (chain.Client, error) {
+		if rpc == "https://eth-sepolia.example" {
+			return l1, nil
+		}
+		return c, nil
+	})
 
 	code, stdout, stderr := exec("send", "--amount", "0.00001")
 	if code != exitOK {

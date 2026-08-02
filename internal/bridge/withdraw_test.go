@@ -33,8 +33,8 @@ func withdrawCfg(t *testing.T) config.Config {
 			config.EnvDestAddr:      destAddr,
 			config.EnvSourceChainID: "84532",
 			config.EnvDestChainID:   "11155111",
-			config.EnvL1RPCURL:      "https://eth-sepolia.example",
-			config.EnvL2RPCURL:      "https://base-sepolia.example",
+			config.EnvDestRPCURL:    "https://eth-sepolia.example",
+			config.EnvSourceRPCURL:  "https://base-sepolia.example",
 		}[k]
 	})
 	if err != nil {
@@ -140,7 +140,7 @@ func TestWithdrawInitiateHappyPath(t *testing.T) {
 
 	// The transaction must go to the L2 bridge, carry the value, and name the
 	// ETH sentinel the deployed contract actually accepts.
-	if got := tx.To(); got == nil || *got != common.HexToAddress(config.L2StandardBridgePredeploy) {
+	if got := tx.To(); got == nil || *got != opstack.L2StandardBridgePredeploy {
 		t.Errorf("To = %v, want the L2 standard bridge", got)
 	}
 	if tx.Value().Cmp(amount) != 0 {
@@ -325,7 +325,7 @@ func TestWithdrawOptions(t *testing.T) {
 	}
 
 	d := New(withdrawCfg(t), &fake.Client{}, &fake.Client{})
-	if d.l2Bridge != common.HexToAddress(config.L2StandardBridgePredeploy) {
+	if d.l2Bridge != opstack.L2StandardBridgePredeploy {
 		t.Errorf("default l2Bridge = %s", d.l2Bridge.Hex())
 	}
 	if d.withdrawMinGasLimit != config.DefaultWithdrawMinGasLimit {

@@ -15,6 +15,7 @@ import (
 	"github.com/pigfox/eth-bridge-go/internal/bridge"
 	"github.com/pigfox/eth-bridge-go/internal/chain"
 	"github.com/pigfox/eth-bridge-go/internal/config"
+	"github.com/pigfox/eth-bridge-go/internal/registry"
 	"github.com/pigfox/eth-bridge-go/internal/route"
 )
 
@@ -47,7 +48,7 @@ var (
 	dial   = chain.Dial
 )
 
-const usage = `bridge — move testnet ETH between Ethereum Sepolia and Base Sepolia.
+const usage = `bridge — move ETH within one EVM chain, or between an L1 and an OP Stack L2.
 
 usage:
   bridge send --amount <eth>   send the configured route
@@ -57,12 +58,20 @@ configuration is read from the environment:
   BRIDGE_SOURCE_ADDR       funding account
   BRIDGE_SOURCE_PK         its private key (must derive to BRIDGE_SOURCE_ADDR)
   BRIDGE_DEST_ADDR         recipient on the destination chain
-  BRIDGE_SOURCE_CHAIN_ID   11155111 (Eth Sepolia) or 84532 (Base Sepolia)
-  BRIDGE_DEST_CHAIN_ID     11155111 (Eth Sepolia) or 84532 (Base Sepolia)
-  BRIDGE_L1_RPC_URL        Ethereum Sepolia endpoint, if the route touches L1
-  BRIDGE_L2_RPC_URL        Base Sepolia endpoint, if the route touches L2
+  BRIDGE_SOURCE_CHAIN_ID   chain to send from
+  BRIDGE_DEST_CHAIN_ID     chain to send to; equal to the source for a
+                           plain transfer
+  BRIDGE_SOURCE_RPC_URL    endpoint for the source chain
+  BRIDGE_DEST_RPC_URL      endpoint for the destination chain, required
+                           only when the two chains differ
   BRIDGE_WITHDRAWALS_DIR   where to record initiated withdrawals
                            (optional, defaults to ./withdrawals)
+
+the bridge contracts are discovered from the chains. these override that,
+and are a last resort rather than a normal setting:
+  BRIDGE_L1_STANDARD_BRIDGE_ADDRESS
+  BRIDGE_L2_STANDARD_BRIDGE_ADDRESS
+  BRIDGE_OPTIMISM_PORTAL_ADDRESS
 `
 
 // run is the whole command. It returns the process exit code.
@@ -112,7 +121,7 @@ func runSend(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	res, err := dispatch(context.Background(), cfg, amount)
+	res, err := dispatch(context.Background(), cfg, amount, stdout)
 	// A deposit that reached L1 reports its hashes even when the L2 credit did
 	// not arrive in time, because those hashes are how the operator finds out
 	// what happened.
@@ -160,7 +169,7 @@ NOTE: this only INITIATED the withdrawal. The ETH is not on L1.
 
 Two more transactions are required, and eth-bridge-go performs NEITHER:
   1. prove    — once an L2 output root covering the block above is published
-  2. finalize — after the fault-proof window, roughly 7 days on Base Sepolia
+  2. finalize — after the fault-proof window, roughly 7 days on the OP Stack testnets
 
 The saved JSON holds the parameters both steps need. They cannot be
 reconstructed by this tool, so do not delete it.
@@ -168,47 +177,65 @@ reconstructed by this tool, so do not delete it.
 
 // dispatch resolves the configured route and runs it.
 //
-// The route is resolved here rather than in runSend so that this function is
-// the single place that turns a configuration into an operation, and so that
-// the unsupported-route and unimplemented-route paths are reachable from a test
-// that hands it a Config directly.
-func dispatch(ctx context.Context, cfg config.Config, amount *big.Int) (bridge.Result, error) {
-	kind, err := route.Resolve(cfg.SourceChainID, cfg.DestChainID)
+// Both endpoints are opened before the route is decided, because deciding it
+// means asking the chains what they are. That is also where the bridge
+// addresses come from: nothing below this line knows any, and a route that
+// could not produce them does not run.
+func dispatch(ctx context.Context, cfg config.Config, amount *big.Int, stdout io.Writer) (bridge.Result, error) {
+	src, dst, err := dialRoute(ctx, cfg)
 	if err != nil {
 		return bridge.Result{}, err
 	}
+	defer src.Close()
+	defer dst.Close()
 
-	switch kind {
-	case route.KindSameChain:
-		c, err := dialChain(ctx, cfg, cfg.SourceChainID)
-		if err != nil {
-			return bridge.Result{}, err
-		}
-		defer c.Close()
-		return bridge.New(cfg, c, c).SameChain(ctx, amount)
-	case route.KindDeposit:
-		src, err := dialChain(ctx, cfg, cfg.SourceChainID)
-		if err != nil {
-			return bridge.Result{}, err
-		}
-		defer src.Close()
-		dst, err := dialChain(ctx, cfg, cfg.DestChainID)
-		if err != nil {
-			return bridge.Result{}, err
-		}
-		defer dst.Close()
-		return bridge.New(cfg, src, dst).Deposit(ctx, amount)
-	default:
-		// Resolve returns an error for anything it does not recognise, and
-		// that error was handled above. The only kind left here is
-		// withdraw-initiate, so this arm is it rather than a dead fallback.
-		c, err := dialChain(ctx, cfg, cfg.SourceChainID)
-		if err != nil {
-			return bridge.Result{}, err
-		}
-		defer c.Close()
-		return bridge.New(cfg, c, c, bridge.WithWithdrawalsDir(cfg.WithdrawalsDir)).WithdrawInitiate(ctx, amount)
+	rt, err := route.Resolve(ctx,
+		route.Endpoint{ChainID: cfg.SourceChainID, Client: src},
+		route.Endpoint{ChainID: cfg.DestChainID, Client: dst},
+		route.Options{Overrides: cfg.Overrides, Fallback: registry.Addresses},
+	)
+	if err != nil {
+		return bridge.Result{}, err
 	}
+	reportAddresses(stdout, rt)
+
+	switch rt.Kind {
+	case route.KindSameChain:
+		return bridge.New(cfg, src, dst).SameChain(ctx, amount)
+	case route.KindDeposit:
+		return bridge.New(cfg, src, dst,
+			bridge.WithL1StandardBridge(rt.Addrs.L1StandardBridge),
+		).Deposit(ctx, amount)
+	default:
+		// Resolve returns an error for anything it does not recognise, and that
+		// error was handled above. The only kind left here is
+		// withdraw-initiate, so this arm is it rather than a dead fallback.
+		return bridge.New(cfg, src, dst,
+			bridge.WithL2StandardBridge(rt.Addrs.L2StandardBridge),
+			bridge.WithWithdrawalsDir(cfg.WithdrawalsDir),
+		).WithdrawInitiate(ctx, amount)
+	}
+}
+
+// dialRoute opens both sides of the configured route.
+//
+// A same-chain transfer has one endpoint standing in for both, so it opens one
+// connection and hands it back twice rather than dialling the same node again.
+// Closing it twice is harmless.
+func dialRoute(ctx context.Context, cfg config.Config) (src, dst chain.Client, err error) {
+	src, err = dialChain(ctx, cfg, cfg.SourceChainID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if cfg.DestChainID == cfg.SourceChainID {
+		return src, src, nil
+	}
+	dst, err = dialChain(ctx, cfg, cfg.DestChainID)
+	if err != nil {
+		src.Close()
+		return nil, nil, err
+	}
+	return src, dst, nil
 }
 
 // dialChain opens a client for one of the configured chains.
@@ -256,14 +283,25 @@ func parseEther(s string) (*big.Int, error) {
 	return wei, nil
 }
 
-// explorerURL returns a block explorer link for a transaction hash.
-func explorerURL(chainID uint64, hash string) string {
-	switch chainID {
-	case config.ChainIDEthSepolia:
-		return "https://sepolia.etherscan.io/tx/" + hash
-	case config.ChainIDBaseSepolia:
-		return "https://sepolia.basescan.org/tx/" + hash
-	default:
-		return hash
+// reportAddresses prints the contracts a bridge route is about to use, and
+// where each came from.
+//
+// It prints before anything is sent, on purpose. "discovery" means the chains
+// were asked and agreed; "registry" means they could not be reached and a
+// vendored file answered instead; "override" means the operator asserted it. An
+// operator who is about to move value should be able to see which of those
+// happened without turning on a debug flag.
+func reportAddresses(stdout io.Writer, rt route.Route) {
+	if rt.Kind != route.KindDeposit && rt.Kind != route.KindWithdrawInitiate {
+		return
 	}
+	fmt.Fprintf(stdout, "l1 bridge:  %s (%s)\n", rt.Addrs.L1StandardBridge.Hex(), rt.Sources.L1StandardBridge)
+	fmt.Fprintf(stdout, "l2 bridge:  %s (%s)\n", rt.Addrs.L2StandardBridge.Hex(), rt.Sources.L2StandardBridge)
+	fmt.Fprintf(stdout, "portal:     %s (%s)\n", rt.Addrs.OptimismPortal.Hex(), rt.Sources.OptimismPortal)
+}
+
+// explorerURL returns a block explorer link for a transaction hash, or the bare
+// hash for a chain the vendored snapshot has no confirmed explorer for.
+func explorerURL(chainID uint64, hash string) string {
+	return registry.ExplorerTx(chainID, hash)
 }

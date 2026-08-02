@@ -4,74 +4,62 @@ package e2e
 
 import (
 	"context"
-	"math/big"
-	"os"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/pigfox/eth-bridge-go/internal/bridge"
-	"github.com/pigfox/eth-bridge-go/internal/chain"
-	"github.com/pigfox/eth-bridge-go/internal/config"
+	"github.com/pigfox/eth-bridge-go/internal/registry"
 )
 
-// depositAmount is the value bridged by T3.
-var depositAmount = big.NewInt(500_000_000_000_000) // 0.0005 ETH
-
-// T3: a real L1 to L2 deposit through the Base Standard Bridge.
+// T1: a real L1 to L2 deposit through the Standard Bridge, on whatever pair the
+// suite is pointed at.
+//
+// This runs first because it is also what funds the L2 side for the tests that
+// follow it.
 //
 // The assertions are the two that matter and one that is easy to skip: the L1
 // receipt succeeded, the L2 balance actually moved, and the L2 transaction hash
-// this tool *derived* from the L1 receipt resolves to a real transaction on
-// Base Sepolia. That last one is the only way to know the derivation is right
-// rather than merely well-formed.
-func TestT3DepositEthSepoliaToBaseSepolia(t *testing.T) {
-	requireEnv(t,
-		config.EnvSourceAddr, config.EnvSourcePK, config.EnvDestAddr,
-		config.EnvL1RPCURL, config.EnvL2RPCURL,
-	)
+// this tool *derived* from the L1 receipt resolves to a real transaction on the
+// rollup. That last one is the only way to know the derivation is right rather
+// than merely well-formed.
+func TestT1Deposit(t *testing.T) {
+	requireCredentials(t)
+	pair := livePair(t)
 
-	cfg, err := config.Load(func(k string) string {
-		switch k {
-		case config.EnvSourceChainID:
-			return strconvUint(config.ChainIDEthSepolia)
-		case config.EnvDestChainID:
-			return strconvUint(config.ChainIDBaseSepolia)
-		default:
-			return os.Getenv(k)
-		}
-	})
-	if err != nil {
-		t.Fatalf("config.Load: %v", err)
-	}
+	cfg := loadConfig(t, pair.l1ID, pair.l1RPC, pair.l2ID, pair.l2RPC, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), e2eTimeout)
 	defer cancel()
 
-	l1 := dialOrFail(t, ctx, cfg, config.ChainIDEthSepolia)
+	l1 := dialOrFail(t, ctx, cfg, pair.l1ID)
 	defer l1.Close()
-	l2 := dialOrFail(t, ctx, cfg, config.ChainIDBaseSepolia)
+	l2 := dialOrFail(t, ctx, cfg, pair.l2ID)
 	defer l2.Close()
 
+	// The addresses come from the chains. Nothing in this test knows any.
+	rt := resolveLive(t, ctx, cfg, l1, l2)
+
 	before := balance(t, ctx, l1, cfg)
-	t.Logf("L1 balance before: %s wei", before)
+	t.Logf("chain %d balance before: %s wei", pair.l1ID, before)
 	if before.Cmp(depositAmount) <= 0 {
-		t.Skipf("%s holds %s wei on Eth Sepolia, not enough to deposit %s wei plus gas",
-			cfg.SourceAddr.Hex(), before, depositAmount)
+		t.Skipf("%s holds %s wei on chain %d, not enough to deposit %s wei plus gas",
+			cfg.SourceAddr.Hex(), before, pair.l1ID, depositAmount)
 	}
 
 	b := bridge.New(cfg, l1, l2,
+		bridge.WithL1StandardBridge(rt.Addrs.L1StandardBridge),
 		bridge.WithConfirmTimeout(e2eTimeout),
 		bridge.WithPollInterval(pollInteval),
 	)
 
 	res, err := b.Deposit(ctx, depositAmount)
 	if res.SrcTxHash != (common.Hash{}) {
-		t.Logf("L1 tx: https://sepolia.etherscan.io/tx/%s", res.SrcTxHash.Hex())
+		t.Logf("L1 tx: %s", registry.ExplorerTx(pair.l1ID, res.SrcTxHash.Hex()))
 	}
 	if res.DstTxHash != (common.Hash{}) {
-		t.Logf("L2 tx: https://sepolia.basescan.org/tx/%s", res.DstTxHash.Hex())
+		t.Logf("L2 tx: %s", registry.ExplorerTx(pair.l2ID, res.DstTxHash.Hex()))
 	}
 	if err != nil {
 		t.Fatalf("Deposit: %v", err)
@@ -89,9 +77,9 @@ func TestT3DepositEthSepoliaToBaseSepolia(t *testing.T) {
 
 	// The ETH actually arrived.
 	if res.Credited == nil || res.Credited.Sign() <= 0 {
-		t.Fatalf("Credited = %v, want a positive delta on L2", res.Credited)
+		t.Fatalf("Credited = %v, want a positive delta on chain %d", res.Credited, pair.l2ID)
 	}
-	t.Logf("L2 credited %s wei to %s", res.Credited, cfg.DestAddr.Hex())
+	t.Logf("chain %d credited %s wei to %s", pair.l2ID, res.Credited, cfg.DestAddr.Hex())
 	if res.Credited.Cmp(depositAmount) != 0 {
 		t.Logf("note: credited %s wei against a deposit of %s wei", res.Credited, depositAmount)
 	}
@@ -100,24 +88,10 @@ func TestT3DepositEthSepoliaToBaseSepolia(t *testing.T) {
 	// derivation were wrong, this is what would catch it.
 	l2rcpt, err := l2.TransactionReceipt(ctx, res.DstTxHash)
 	if err != nil {
-		t.Fatalf("derived L2 hash %s does not resolve on Base Sepolia: %v", res.DstTxHash.Hex(), err)
+		t.Fatalf("derived L2 hash %s does not resolve on chain %d: %v", res.DstTxHash.Hex(), pair.l2ID, err)
 	}
 	if l2rcpt.Status != types.ReceiptStatusSuccessful {
 		t.Fatalf("L2 receipt status = %d, want 1", l2rcpt.Status)
 	}
 	t.Logf("L2 receipt status 1 in block %s — derived hash confirmed", l2rcpt.BlockNumber)
-}
-
-// dialOrFail opens a client for one of the configured chains.
-func dialOrFail(t *testing.T, ctx context.Context, cfg config.Config, chainID uint64) chain.Client {
-	t.Helper()
-	rpc, err := cfg.RPCFor(chainID)
-	if err != nil {
-		t.Fatalf("RPCFor(%d): %v", chainID, err)
-	}
-	c, err := chain.Dial(ctx, rpc)
-	if err != nil {
-		t.Fatalf("dial chain %d: %v", chainID, err)
-	}
-	return c
 }

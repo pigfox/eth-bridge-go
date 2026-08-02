@@ -2,11 +2,28 @@
 
 ## This is testnet software
 
-`eth-bridge-go` supports Ethereum Sepolia (`11155111`) and Base Sepolia
-(`84532`), and nothing else. `internal/config` rejects any other chain ID at
-load time. Do not point it at mainnet: it has not been reviewed for that, and
-the chain allowlist exists so that a typo in `BRIDGE_SOURCE_CHAIN_ID` cannot
-quietly move real value.
+**There is no longer a chain allowlist.** Earlier versions accepted only
+Ethereum Sepolia and Base Sepolia and rejected every other chain ID at load
+time. That check is gone: `eth-bridge-go` now works out what a pair of chains
+is by asking them, which is what makes it usable on networks it was not built
+against — and which also means **a typo in `BRIDGE_SOURCE_CHAIN_ID` is no longer
+caught by a list.** If you have a funded mainnet key in the environment and you
+mistype a chain ID, nothing here will stop you.
+
+What still holds:
+
+- The endpoint must actually serve the chain ID you configured. `verifyChain`
+  reads `eth_chainId` and refuses to sign against a mismatch, so a chain ID
+  that disagrees with its RPC URL fails before any transaction is built.
+- A bridge route must be a genuinely paired L1 and OP Stack L2, proven by
+  reading both chains. An unpaired pair is refused, not attempted.
+- The addresses a deposit or withdrawal is sent to are derived from the chains
+  rather than assumed, and the tool prints each one, and where it came from,
+  before it sends anything. `(override)` beside an address means the operator
+  asserted it and the chain has not confirmed it.
+
+This tool has still not been reviewed for mainnet use. Treat it as testnet
+software, and keep mainnet keys out of the environment you run it in.
 
 ## Never commit a private key
 
