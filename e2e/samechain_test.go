@@ -1,81 +1,42 @@
 //go:build e2e
 
-// Package e2e holds tests that spend real testnet ETH against live nodes.
-//
-// They are behind the `e2e` build tag so that neither `go test ./...` nor the
-// coverage gate can pick them up: those must be runnable by anyone who has
-// cloned the repository, and these need funded keys. Run them with
-// scripts/5.e2e-live.sh.
 package e2e
 
 import (
 	"context"
-	"math/big"
-	"os"
 	"testing"
-	"time"
 
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/pigfox/eth-bridge-go/internal/bridge"
-	"github.com/pigfox/eth-bridge-go/internal/chain"
-	"github.com/pigfox/eth-bridge-go/internal/config"
+	"github.com/pigfox/eth-bridge-go/internal/registry"
 )
 
-// sendAmount is deliberately tiny. The transfer is to the sender's own address,
-// so the only ETH actually consumed is gas.
-var sendAmount = big.NewInt(10_000_000_000_000) // 0.00001 ETH
-
-const (
-	e2eTimeout  = 10 * time.Minute
-	pollInteval = 5 * time.Second
-)
-
-// The live harness exports one endpoint per network, because a single exported
-// environment has to drive tests that run in both directions. The tool itself
-// takes a source and a destination endpoint and has no opinion about which
-// network is which, so the mapping lives here rather than in the library.
-const (
-	envEthSepoliaRPC  = "BRIDGE_L1_RPC_URL"
-	envBaseSepoliaRPC = "BRIDGE_L2_RPC_URL"
-)
-
-// T1: a same-chain transfer on Base Sepolia.
-func TestT1SameChainBaseSepolia(t *testing.T) {
-	runSameChain(t, config.ChainIDBaseSepolia, "Base Sepolia", "https://sepolia.basescan.org/tx/")
+// T2: a same-chain transfer on the rollup.
+func TestT2SameChainOnL2(t *testing.T) {
+	pair := livePair(t)
+	runSameChain(t, pair.l2ID, pair.l2RPC)
 }
 
-// T2: a same-chain transfer on Ethereum Sepolia.
-func TestT2SameChainEthSepolia(t *testing.T) {
-	runSameChain(t, config.ChainIDEthSepolia, "Ethereum Sepolia", "https://sepolia.etherscan.io/tx/")
+// T3: a same-chain transfer on the settlement layer.
+//
+// The two together are the P1 claim: a plain transfer depends on no bridge and
+// no pairing, so it works on either side of the pair — and, by the same
+// argument, on any EVM chain.
+func TestT3SameChainOnL1(t *testing.T) {
+	pair := livePair(t)
+	runSameChain(t, pair.l1ID, pair.l1RPC)
 }
 
 // runSameChain performs one live same-chain transfer and asserts the receipt
 // came back successful.
-func runSameChain(t *testing.T, chainID uint64, network, explorer string) {
+func runSameChain(t *testing.T, chainID uint64, rpc string) {
 	t.Helper()
+	requireCredentials(t)
 
-	rpcVar := envEthSepoliaRPC
-	if chainID == config.ChainIDBaseSepolia {
-		rpcVar = envBaseSepoliaRPC
-	}
-	requireEnv(t, config.EnvSourceAddr, config.EnvSourcePK, config.EnvDestAddr, rpcVar)
-
-	// The chain IDs and the endpoint are supplied by the test rather than the
-	// environment, so that one exported environment drives both networks.
-	cfg, err := config.Load(func(k string) string {
-		switch k {
-		case config.EnvSourceChainID, config.EnvDestChainID:
-			return strconvUint(chainID)
-		case config.EnvSourceRPCURL:
-			return os.Getenv(rpcVar)
-		default:
-			return os.Getenv(k)
-		}
-	})
-	if err != nil {
-		t.Fatalf("config.Load: %v", err)
-	}
+	// Source and destination are the same chain, so the second endpoint is
+	// never asked for and the route is decided without touching the network.
+	cfg := loadConfig(t, chainID, rpc, chainID, rpc, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), e2eTimeout)
 	defer cancel()
@@ -84,12 +45,12 @@ func runSameChain(t *testing.T, chainID uint64, network, explorer string) {
 	defer client.Close()
 
 	before := balance(t, ctx, client, cfg)
-	t.Logf("%s: sending %s wei from %s to %s (balance before: %s wei)",
-		network, sendAmount, cfg.SourceAddr.Hex(), cfg.DestAddr.Hex(), before)
+	t.Logf("chain %d: sending %s wei from %s to %s (balance before: %s wei)",
+		chainID, sendAmount, cfg.SourceAddr.Hex(), cfg.DestAddr.Hex(), before)
 
 	if before.Cmp(sendAmount) <= 0 {
-		t.Skipf("%s: %s holds %s wei, not enough to cover %s wei plus gas",
-			network, cfg.SourceAddr.Hex(), before, sendAmount)
+		t.Skipf("chain %d: %s holds %s wei, not enough to cover %s wei plus gas",
+			chainID, cfg.SourceAddr.Hex(), before, sendAmount)
 	}
 
 	b := bridge.New(cfg, client, client,
@@ -99,48 +60,17 @@ func runSameChain(t *testing.T, chainID uint64, network, explorer string) {
 
 	res, err := b.SameChain(ctx, sendAmount)
 	if err != nil {
-		t.Fatalf("%s: SameChain: %v", network, err)
+		t.Fatalf("chain %d: SameChain: %v", chainID, err)
 	}
 
-	t.Logf("%s: tx %s", network, res.SrcTxHash.Hex())
-	t.Logf("%s: %s%s", network, explorer, res.SrcTxHash.Hex())
+	t.Logf("chain %d: tx %s", chainID, registry.ExplorerTx(chainID, res.SrcTxHash.Hex()))
 
 	rcpt, err := b.WaitReceipt(ctx, client, res.SrcTxHash)
 	if err != nil {
-		t.Fatalf("%s: receipt: %v", network, err)
+		t.Fatalf("chain %d: receipt: %v", chainID, err)
 	}
 	if rcpt.Status != types.ReceiptStatusSuccessful {
-		t.Fatalf("%s: receipt status = %d, want 1", network, rcpt.Status)
+		t.Fatalf("chain %d: receipt status = %d, want 1", chainID, rcpt.Status)
 	}
-	t.Logf("%s: receipt status 1 in block %s, gas used %d", network, rcpt.BlockNumber, rcpt.GasUsed)
-}
-
-// requireEnv skips the test, with a message naming what is missing, rather than
-// failing it. An unfunded checkout should report "skipped", not "broken".
-func requireEnv(t *testing.T, names ...string) {
-	t.Helper()
-	var missing []string
-	for _, n := range names {
-		if os.Getenv(n) == "" {
-			missing = append(missing, n)
-		}
-	}
-	if len(missing) > 0 {
-		t.Skipf("skipping live test: %v not set (run scripts/5.e2e-live.sh)", missing)
-	}
-}
-
-// balance reads the source account's balance.
-func balance(t *testing.T, ctx context.Context, c chain.Client, cfg config.Config) *big.Int {
-	t.Helper()
-	bal, err := c.BalanceAt(ctx, cfg.SourceAddr, nil)
-	if err != nil {
-		t.Fatalf("read balance: %v", err)
-	}
-	return bal
-}
-
-// strconvUint renders a chain ID for the injected getenv.
-func strconvUint(v uint64) string {
-	return new(big.Int).SetUint64(v).String()
+	t.Logf("chain %d: receipt status 1 in block %s, gas used %d", chainID, rcpt.BlockNumber, rcpt.GasUsed)
 }

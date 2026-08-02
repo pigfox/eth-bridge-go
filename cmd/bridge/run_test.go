@@ -257,8 +257,8 @@ func TestDispatchWithdrawalDialFailure(t *testing.T) {
 	withDial(t, func(context.Context, string) (chain.Client, error) { return nil, errBoom })
 
 	cfg := config.Config{
-		SourceChainID: config.ChainIDBaseSepolia,
-		DestChainID:   config.ChainIDEthSepolia,
+		SourceChainID: 84532,
+		DestChainID:   11155111,
 		SourceRPCURL:  "l1",
 		DestRPCURL:    "l2",
 	}
@@ -334,8 +334,8 @@ func TestExplorerURL(t *testing.T) {
 		chainID uint64
 		want    string
 	}{
-		{config.ChainIDEthSepolia, "https://sepolia.etherscan.io/tx/" + hash},
-		{config.ChainIDBaseSepolia, "https://sepolia.basescan.org/tx/" + hash},
+		{11155111, "https://sepolia.etherscan.io/tx/" + hash},
+		{84532, "https://sepolia.basescan.org/tx/" + hash},
 		{1, hash},
 	}
 	for _, tc := range tests {
@@ -474,8 +474,8 @@ func TestSendDepositReportsPartialResultOnFailure(t *testing.T) {
 
 func TestDispatchDepositDialFailures(t *testing.T) {
 	cfg := config.Config{
-		SourceChainID: config.ChainIDEthSepolia,
-		DestChainID:   config.ChainIDBaseSepolia,
+		SourceChainID: 11155111,
+		DestChainID:   84532,
 		SourceRPCURL:  "l1",
 		DestRPCURL:    "l2",
 	}

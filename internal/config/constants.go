@@ -2,15 +2,6 @@ package config
 
 import "time"
 
-// Chain IDs of the two testnets this tool bridges between. They are named
-// here so that no call site carries a bare numeric literal.
-const (
-	// ChainIDEthSepolia is the Ethereum Sepolia L1 testnet.
-	ChainIDEthSepolia uint64 = 11155111
-	// ChainIDBaseSepolia is the Base Sepolia L2 testnet.
-	ChainIDBaseSepolia uint64 = 84532
-)
-
 // LegacyERC20ETH is the sentinel token address that means "ETH" to
 // L2StandardBridge.withdrawTo.
 //
