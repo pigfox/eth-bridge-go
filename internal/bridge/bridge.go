@@ -364,7 +364,7 @@ func (b *Bridger) WaitReceipt(ctx context.Context, c chain.Client, hash common.H
 	}
 }
 
-// Deposit moves ETH from L1 to L2 through the Base Standard Bridge.
+// Deposit moves ETH from an L1 to an OP Stack L2 through the Standard Bridge.
 //
 // It calls L1StandardBridge.depositETHTo with the amount as the transaction
 // value, waits for the L1 receipt, derives the hash of the L2 transaction the

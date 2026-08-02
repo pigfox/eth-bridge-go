@@ -1,4 +1,5 @@
-// Command bridge moves testnet ETH between Ethereum Sepolia and Base Sepolia.
+// Command bridge moves testnet ETH within one EVM chain, or between an L1 and
+// an OP Stack L2 anchored to it.
 //
 // This file holds no logic on purpose. Everything is in run, which takes its
 // arguments and its two output streams as parameters and returns an exit code

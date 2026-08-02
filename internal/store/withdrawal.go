@@ -45,7 +45,7 @@ type document struct {
 // later who no longer remembers what it was for.
 const note = "Initiated L2->L1 withdrawal. Proving and finalizing are NOT performed " +
 	"by eth-bridge-go: prove after the L2 output root covering l2BlockNumber is " +
-	"published, then finalize after the fault-proof window (~7 days on Base Sepolia)."
+	"published, then finalize after the fault-proof window (~7 days on the OP Stack testnets)."
 
 // encode validates a withdrawal and renders its on-disk document.
 func encode(w opstack.Withdrawal) ([]byte, error) {

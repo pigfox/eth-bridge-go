@@ -169,7 +169,7 @@ NOTE: this only INITIATED the withdrawal. The ETH is not on L1.
 
 Two more transactions are required, and eth-bridge-go performs NEITHER:
   1. prove    — once an L2 output root covering the block above is published
-  2. finalize — after the fault-proof window, roughly 7 days on Base Sepolia
+  2. finalize — after the fault-proof window, roughly 7 days on the OP Stack testnets
 
 The saved JSON holds the parameters both steps need. They cannot be
 reconstructed by this tool, so do not delete it.
