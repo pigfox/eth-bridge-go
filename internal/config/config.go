@@ -16,6 +16,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+
+	"github.com/pigfox/eth-bridge-go/internal/opstack"
 )
 
 // ErrMissing is returned when a required environment variable is unset or empty.
@@ -42,6 +44,9 @@ type Config struct {
 	// WithdrawalsDir is where initiated withdrawals are recorded. It is
 	// optional and defaults to DefaultWithdrawalsDir.
 	WithdrawalsDir string
+	// Overrides are bridge addresses supplied by the operator. Any that is
+	// left at the zero address is discovered instead.
+	Overrides opstack.Addresses
 
 	// sourceKey is unexported so that it cannot be reached by reflection-based
 	// formatting of the struct from outside this package.
@@ -122,8 +127,46 @@ func Load(getenv func(string) string) (Config, error) {
 	if cfg.SourceRPCURL, cfg.DestRPCURL, err = requireRPCs(getenv, cfg.SourceChainID, cfg.DestChainID); err != nil {
 		return Config{}, err
 	}
+	if cfg.Overrides, err = readOverrides(getenv); err != nil {
+		return Config{}, err
+	}
 	cfg.WithdrawalsDir = orDefault(getenv(EnvWithdrawalsDir), DefaultWithdrawalsDir)
 	return cfg, nil
+}
+
+// readOverrides reads the optional bridge address overrides.
+//
+// Each is validated even though each is optional: a variable that is set but
+// malformed is a mistake the operator wants to hear about, and silently
+// ignoring it would fall through to discovery and look like it had worked.
+func readOverrides(getenv func(string) string) (opstack.Addresses, error) {
+	var (
+		out opstack.Addresses
+		err error
+	)
+	if out.L1StandardBridge, err = optionalAddress(getenv, EnvL1StandardBridge); err != nil {
+		return opstack.Addresses{}, err
+	}
+	if out.L2StandardBridge, err = optionalAddress(getenv, EnvL2StandardBridge); err != nil {
+		return opstack.Addresses{}, err
+	}
+	if out.OptimismPortal, err = optionalAddress(getenv, EnvOptimismPortal); err != nil {
+		return opstack.Addresses{}, err
+	}
+	return out, nil
+}
+
+// optionalAddress reads an address that may be absent. An unset variable gives
+// the zero address and no error; a malformed one is an error.
+func optionalAddress(getenv func(string) string, name string) (common.Address, error) {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" {
+		return common.Address{}, nil
+	}
+	if !common.IsHexAddress(raw) {
+		return common.Address{}, fmt.Errorf("%w: %s is not a valid 0x-prefixed address", ErrInvalid, name)
+	}
+	return common.HexToAddress(raw), nil
 }
 
 // orDefault returns the trimmed value, or fallback when it is empty.

@@ -75,6 +75,15 @@ const (
 	EnvDestRPCURL   = "BRIDGE_DEST_RPC_URL"
 	// EnvWithdrawalsDir is optional and defaults to DefaultWithdrawalsDir.
 	EnvWithdrawalsDir = "BRIDGE_WITHDRAWALS_DIR"
+
+	// Address overrides. All optional, and all a last resort: the addresses
+	// are discovered from the chains, and an operator who sets one of these is
+	// asserting something the chain disagrees with or cannot be asked about.
+	// They exist because a chain running contracts this tool cannot read
+	// should be usable by someone who knows the addresses, not blocked.
+	EnvL1StandardBridge = "BRIDGE_L1_STANDARD_BRIDGE_ADDRESS"
+	EnvL2StandardBridge = "BRIDGE_L2_STANDARD_BRIDGE_ADDRESS"
+	EnvOptimismPortal   = "BRIDGE_OPTIMISM_PORTAL_ADDRESS"
 )
 
 // redacted is what stands in for the private key everywhere the configuration

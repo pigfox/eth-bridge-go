@@ -15,6 +15,7 @@ import (
 	"github.com/pigfox/eth-bridge-go/internal/bridge"
 	"github.com/pigfox/eth-bridge-go/internal/chain"
 	"github.com/pigfox/eth-bridge-go/internal/config"
+	"github.com/pigfox/eth-bridge-go/internal/registry"
 	"github.com/pigfox/eth-bridge-go/internal/route"
 )
 
@@ -65,6 +66,12 @@ configuration is read from the environment:
                            only when the two chains differ
   BRIDGE_WITHDRAWALS_DIR   where to record initiated withdrawals
                            (optional, defaults to ./withdrawals)
+
+the bridge contracts are discovered from the chains. these override that,
+and are a last resort rather than a normal setting:
+  BRIDGE_L1_STANDARD_BRIDGE_ADDRESS
+  BRIDGE_L2_STANDARD_BRIDGE_ADDRESS
+  BRIDGE_OPTIMISM_PORTAL_ADDRESS
 `
 
 // run is the whole command. It returns the process exit code.
@@ -114,7 +121,7 @@ func runSend(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	res, err := dispatch(context.Background(), cfg, amount)
+	res, err := dispatch(context.Background(), cfg, amount, stdout)
 	// A deposit that reached L1 reports its hashes even when the L2 credit did
 	// not arrive in time, because those hashes are how the operator finds out
 	// what happened.
@@ -174,7 +181,7 @@ reconstructed by this tool, so do not delete it.
 // means asking the chains what they are. That is also where the bridge
 // addresses come from: nothing below this line knows any, and a route that
 // could not produce them does not run.
-func dispatch(ctx context.Context, cfg config.Config, amount *big.Int) (bridge.Result, error) {
+func dispatch(ctx context.Context, cfg config.Config, amount *big.Int, stdout io.Writer) (bridge.Result, error) {
 	src, dst, err := dialRoute(ctx, cfg)
 	if err != nil {
 		return bridge.Result{}, err
@@ -185,10 +192,12 @@ func dispatch(ctx context.Context, cfg config.Config, amount *big.Int) (bridge.R
 	rt, err := route.Resolve(ctx,
 		route.Endpoint{ChainID: cfg.SourceChainID, Client: src},
 		route.Endpoint{ChainID: cfg.DestChainID, Client: dst},
+		route.Options{Overrides: cfg.Overrides, Fallback: registry.Addresses},
 	)
 	if err != nil {
 		return bridge.Result{}, err
 	}
+	reportAddresses(stdout, rt)
 
 	switch rt.Kind {
 	case route.KindSameChain:
@@ -274,14 +283,25 @@ func parseEther(s string) (*big.Int, error) {
 	return wei, nil
 }
 
-// explorerURL returns a block explorer link for a transaction hash.
-func explorerURL(chainID uint64, hash string) string {
-	switch chainID {
-	case config.ChainIDEthSepolia:
-		return "https://sepolia.etherscan.io/tx/" + hash
-	case config.ChainIDBaseSepolia:
-		return "https://sepolia.basescan.org/tx/" + hash
-	default:
-		return hash
+// reportAddresses prints the contracts a bridge route is about to use, and
+// where each came from.
+//
+// It prints before anything is sent, on purpose. "discovery" means the chains
+// were asked and agreed; "registry" means they could not be reached and a
+// vendored file answered instead; "override" means the operator asserted it. An
+// operator who is about to move value should be able to see which of those
+// happened without turning on a debug flag.
+func reportAddresses(stdout io.Writer, rt route.Route) {
+	if rt.Kind != route.KindDeposit && rt.Kind != route.KindWithdrawInitiate {
+		return
 	}
+	fmt.Fprintf(stdout, "l1 bridge:  %s (%s)\n", rt.Addrs.L1StandardBridge.Hex(), rt.Sources.L1StandardBridge)
+	fmt.Fprintf(stdout, "l2 bridge:  %s (%s)\n", rt.Addrs.L2StandardBridge.Hex(), rt.Sources.L2StandardBridge)
+	fmt.Fprintf(stdout, "portal:     %s (%s)\n", rt.Addrs.OptimismPortal.Hex(), rt.Sources.OptimismPortal)
+}
+
+// explorerURL returns a block explorer link for a transaction hash, or the bare
+// hash for a chain the vendored snapshot has no confirmed explorer for.
+func explorerURL(chainID uint64, hash string) string {
+	return registry.ExplorerTx(chainID, hash)
 }

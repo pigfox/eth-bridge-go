@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -261,7 +262,7 @@ func TestDispatchWithdrawalDialFailure(t *testing.T) {
 		SourceRPCURL:  "l1",
 		DestRPCURL:    "l2",
 	}
-	if _, err := dispatch(context.Background(), cfg, big.NewInt(1)); !errors.Is(err, errBoom) {
+	if _, err := dispatch(context.Background(), cfg, big.NewInt(1), io.Discard); !errors.Is(err, errBoom) {
 		t.Fatalf("error = %v, want errBoom", err)
 	}
 }
@@ -272,7 +273,7 @@ func TestDispatchUnsupportedRoute(t *testing.T) {
 	withDial(t, func(context.Context, string) (chain.Client, error) { return &fake.Client{}, nil })
 
 	cfg := config.Config{SourceChainID: 1, DestChainID: 137, SourceRPCURL: "src", DestRPCURL: "dst"}
-	_, err := dispatch(context.Background(), cfg, big.NewInt(1))
+	_, err := dispatch(context.Background(), cfg, big.NewInt(1), io.Discard)
 	if !errors.Is(err, route.ErrUnsupportedRoute) {
 		t.Fatalf("error = %v, want route.ErrUnsupportedRoute", err)
 	}
@@ -494,7 +495,7 @@ func TestDispatchDepositDialFailures(t *testing.T) {
 				}
 				return &fake.Client{}, nil
 			})
-			if _, err := dispatch(context.Background(), cfg, big.NewInt(1)); !errors.Is(err, errBoom) {
+			if _, err := dispatch(context.Background(), cfg, big.NewInt(1), io.Discard); !errors.Is(err, errBoom) {
 				t.Fatalf("error = %v, want errBoom", err)
 			}
 		})

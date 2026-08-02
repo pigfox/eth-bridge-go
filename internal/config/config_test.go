@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -260,5 +261,64 @@ func TestWithdrawalsDirDefaultsAndOverrides(t *testing.T) {
 	}
 	if cfg.WithdrawalsDir != DefaultWithdrawalsDir {
 		t.Errorf("WithdrawalsDir = %q, want the default", cfg.WithdrawalsDir)
+	}
+}
+
+// The address overrides are optional, and a malformed one is louder than a
+// missing one: silently ignoring it would fall through to discovery and look
+// like it had been honoured.
+func TestLoadAddressOverrides(t *testing.T) {
+	const (
+		l1Bridge = "0xfd0Bf71F60660E2f608ed56e1659C450eB113120"
+		l2Bridge = "0x4200000000000000000000000000000000000010"
+		portal   = "0x49f53e41452C74589E85cA1677426Ba426459e85"
+	)
+
+	// Absent by default, and absent is the zero address rather than an error.
+	cfg, err := Load(env(baseEnv(t)))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Overrides.L1StandardBridge != (common.Address{}) ||
+		cfg.Overrides.L2StandardBridge != (common.Address{}) ||
+		cfg.Overrides.OptimismPortal != (common.Address{}) {
+		t.Errorf("Overrides = %+v, want all zero when nothing is set", cfg.Overrides)
+	}
+
+	m := baseEnv(t)
+	m[EnvL1StandardBridge] = l1Bridge
+	m[EnvL2StandardBridge] = "  " + l2Bridge + "  " // whitespace is trimmed
+	m[EnvOptimismPortal] = portal
+
+	cfg, err = Load(env(m))
+	if err != nil {
+		t.Fatalf("Load with overrides: %v", err)
+	}
+	if cfg.Overrides.L1StandardBridge != common.HexToAddress(l1Bridge) {
+		t.Errorf("L1StandardBridge = %s, want %s", cfg.Overrides.L1StandardBridge.Hex(), l1Bridge)
+	}
+	if cfg.Overrides.L2StandardBridge != common.HexToAddress(l2Bridge) {
+		t.Errorf("L2StandardBridge = %s, want %s", cfg.Overrides.L2StandardBridge.Hex(), l2Bridge)
+	}
+	if cfg.Overrides.OptimismPortal != common.HexToAddress(portal) {
+		t.Errorf("OptimismPortal = %s, want %s", cfg.Overrides.OptimismPortal.Hex(), portal)
+	}
+	if !cfg.Overrides.Complete() {
+		t.Error("a full set of overrides did not report complete")
+	}
+}
+
+func TestLoadRejectsMalformedOverrides(t *testing.T) {
+	for _, name := range []string{EnvL1StandardBridge, EnvL2StandardBridge, EnvOptimismPortal} {
+		m := baseEnv(t)
+		m[name] = "0xnot-an-address"
+
+		_, err := Load(env(m))
+		if !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: error = %v, want ErrInvalid", name, err)
+		}
+		if err != nil && !strings.Contains(err.Error(), name) {
+			t.Errorf("error %q does not name %s", err, name)
+		}
 	}
 }
