@@ -266,7 +266,7 @@ func TestWithdrawalsDirDefaultsAndOverrides(t *testing.T) {
 
 // The address overrides are optional, and a malformed one is louder than a
 // missing one: silently ignoring it would fall through to discovery and look
-// like it had been honoured.
+// like it had been honored.
 func TestLoadAddressOverrides(t *testing.T) {
 	const (
 		l1Bridge = "0xfd0Bf71F60660E2f608ed56e1659C450eB113120"

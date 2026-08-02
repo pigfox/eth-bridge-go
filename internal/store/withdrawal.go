@@ -77,7 +77,7 @@ func SaveWithdrawal(dir string, txHash common.Hash, w opstack.Withdrawal) (strin
 		return "", fmt.Errorf("create withdrawal directory %s: %w", dir, err)
 	}
 	path := filepath.Join(dir, txHash.Hex()+".json")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := os.WriteFile(path, data, withdrawalFilePerm); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
 	return path, nil

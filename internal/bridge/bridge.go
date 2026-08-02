@@ -101,7 +101,7 @@ type DepositEncoder func(to common.Address, minGasLimit uint32) ([]byte, error)
 // withdrawal-side counterpart to DepositEncoder.
 type WithdrawEncoder func(l2Token, to common.Address, amount *big.Int, minGasLimit uint32) ([]byte, error)
 
-// Option customises a Bridger.
+// Option customizes a Bridger.
 type Option func(*Bridger)
 
 // WithSigner replaces the local key signer.

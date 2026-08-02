@@ -234,7 +234,6 @@ func callAddress(ctx context.Context, on Caller, at common.Address, sig string) 
 	// A single address return is one 32-byte word, left-padded with zeros.
 	// Anything else is a different function that happens to share a selector,
 	// or a contract that returned nothing at all.
-	const wordLen = 32
 	if len(ret) != wordLen {
 		return common.Address{}, fmt.Sprintf("returned %d bytes, want %d", len(ret), wordLen)
 	}

@@ -82,7 +82,7 @@ type Withdrawal struct {
 
 // messagePassedFixedLen is the fixed part of the event's data section: value,
 // gasLimit, the offset of the dynamic data, and the withdrawal hash.
-const messagePassedFixedLen = 32 * 4
+const messagePassedFixedLen = wordLen * 4
 
 // ParseMessagePassed finds the MessagePassed log in an L2 receipt and decodes
 // the withdrawal it describes.
@@ -92,8 +92,8 @@ func ParseMessagePassed(rcpt *types.Receipt) (Withdrawal, error) {
 		return Withdrawal{}, ErrNoMessagePassedLog
 	}
 	// topics: [signature, nonce, sender, target]
-	if len(entry.Topics) != 4 {
-		return Withdrawal{}, fmt.Errorf("%w: %d topics, want 4", ErrBadMessagePassedLog, len(entry.Topics))
+	if len(entry.Topics) != messagePassedLogTopics {
+		return Withdrawal{}, fmt.Errorf("%w: %d topics, want %d", ErrBadMessagePassedLog, len(entry.Topics), messagePassedLogTopics)
 	}
 	if len(entry.Data) < messagePassedFixedLen {
 		return Withdrawal{}, fmt.Errorf("%w: %d bytes of data, want at least %d",
@@ -125,16 +125,16 @@ func dynamicBytesAt(blob, offsetWord []byte) ([]byte, error) {
 
 	offset := new(big.Int).SetBytes(offsetWord)
 	// The offset must leave room for the length word that follows it.
-	if !offset.IsInt64() || offset.Int64() > total-32 {
+	if !offset.IsInt64() || offset.Int64() > total-wordLen {
 		return nil, fmt.Errorf("%w: data offset %s is outside the %d-byte payload",
 			ErrBadMessagePassedLog, offset, total)
 	}
 	at := offset.Int64()
 
-	length := new(big.Int).SetBytes(blob[at : at+32])
-	if !length.IsInt64() || length.Int64() > total-at-32 {
+	length := new(big.Int).SetBytes(blob[at : at+wordLen])
+	if !length.IsInt64() || length.Int64() > total-at-wordLen {
 		return nil, fmt.Errorf("%w: declared data length %s exceeds the %d bytes present",
-			ErrBadMessagePassedLog, length, total-at-32)
+			ErrBadMessagePassedLog, length, total-at-wordLen)
 	}
-	return blob[at+32:][:length.Int64()], nil
+	return blob[at+wordLen:][:length.Int64()], nil
 }
