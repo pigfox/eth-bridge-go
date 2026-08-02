@@ -170,47 +170,63 @@ reconstructed by this tool, so do not delete it.
 
 // dispatch resolves the configured route and runs it.
 //
-// The route is resolved here rather than in runSend so that this function is
-// the single place that turns a configuration into an operation, and so that
-// the unsupported-route and unimplemented-route paths are reachable from a test
-// that hands it a Config directly.
+// Both endpoints are opened before the route is decided, because deciding it
+// means asking the chains what they are. That is also where the bridge
+// addresses come from: nothing below this line knows any, and a route that
+// could not produce them does not run.
 func dispatch(ctx context.Context, cfg config.Config, amount *big.Int) (bridge.Result, error) {
-	kind, err := route.Resolve(cfg.SourceChainID, cfg.DestChainID)
+	src, dst, err := dialRoute(ctx, cfg)
+	if err != nil {
+		return bridge.Result{}, err
+	}
+	defer src.Close()
+	defer dst.Close()
+
+	rt, err := route.Resolve(ctx,
+		route.Endpoint{ChainID: cfg.SourceChainID, Client: src},
+		route.Endpoint{ChainID: cfg.DestChainID, Client: dst},
+	)
 	if err != nil {
 		return bridge.Result{}, err
 	}
 
-	switch kind {
+	switch rt.Kind {
 	case route.KindSameChain:
-		c, err := dialChain(ctx, cfg, cfg.SourceChainID)
-		if err != nil {
-			return bridge.Result{}, err
-		}
-		defer c.Close()
-		return bridge.New(cfg, c, c).SameChain(ctx, amount)
+		return bridge.New(cfg, src, dst).SameChain(ctx, amount)
 	case route.KindDeposit:
-		src, err := dialChain(ctx, cfg, cfg.SourceChainID)
-		if err != nil {
-			return bridge.Result{}, err
-		}
-		defer src.Close()
-		dst, err := dialChain(ctx, cfg, cfg.DestChainID)
-		if err != nil {
-			return bridge.Result{}, err
-		}
-		defer dst.Close()
-		return bridge.New(cfg, src, dst).Deposit(ctx, amount)
+		return bridge.New(cfg, src, dst,
+			bridge.WithL1StandardBridge(rt.Addrs.L1StandardBridge),
+		).Deposit(ctx, amount)
 	default:
-		// Resolve returns an error for anything it does not recognise, and
-		// that error was handled above. The only kind left here is
+		// Resolve returns an error for anything it does not recognise, and that
+		// error was handled above. The only kind left here is
 		// withdraw-initiate, so this arm is it rather than a dead fallback.
-		c, err := dialChain(ctx, cfg, cfg.SourceChainID)
-		if err != nil {
-			return bridge.Result{}, err
-		}
-		defer c.Close()
-		return bridge.New(cfg, c, c, bridge.WithWithdrawalsDir(cfg.WithdrawalsDir)).WithdrawInitiate(ctx, amount)
+		return bridge.New(cfg, src, dst,
+			bridge.WithL2StandardBridge(rt.Addrs.L2StandardBridge),
+			bridge.WithWithdrawalsDir(cfg.WithdrawalsDir),
+		).WithdrawInitiate(ctx, amount)
 	}
+}
+
+// dialRoute opens both sides of the configured route.
+//
+// A same-chain transfer has one endpoint standing in for both, so it opens one
+// connection and hands it back twice rather than dialling the same node again.
+// Closing it twice is harmless.
+func dialRoute(ctx context.Context, cfg config.Config) (src, dst chain.Client, err error) {
+	src, err = dialChain(ctx, cfg, cfg.SourceChainID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if cfg.DestChainID == cfg.SourceChainID {
+		return src, src, nil
+	}
+	dst, err = dialChain(ctx, cfg, cfg.DestChainID)
+	if err != nil {
+		src.Close()
+		return nil, nil, err
+	}
+	return src, dst, nil
 }
 
 // dialChain opens a client for one of the configured chains.

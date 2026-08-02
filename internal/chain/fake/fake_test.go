@@ -157,3 +157,60 @@ func TestClose(t *testing.T) {
 		t.Error("Closed() = false after Close()")
 	}
 }
+
+// CodeAt and CallContract model chain state rather than a sequence, so they are
+// keyed by what is being read and an unscripted read is a legitimate answer
+// rather than a scripting mistake.
+func TestCodeAtAndCallContractAreKeyedByAddress(t *testing.T) {
+	ctx := context.Background()
+	contract := common.HexToAddress("0xc0de")
+	eoa := common.HexToAddress("0xea0a")
+	sel := []byte{0xde, 0xad, 0xbe, 0xef}
+
+	c := &Client{}
+	c.SetCode(contract, []byte{0x60, 0x80})
+	c.SetCall(contract, sel, []byte{0x01})
+
+	code, err := c.CodeAt(ctx, contract, nil)
+	if err != nil || len(code) != 2 {
+		t.Errorf("CodeAt(contract) = %x, %v", code, err)
+	}
+
+	// An address nobody scripted holds no code, which is what a node says
+	// about an account that is not a contract.
+	code, err = c.CodeAt(ctx, eoa, big.NewInt(7))
+	if err != nil || len(code) != 0 {
+		t.Errorf("CodeAt(eoa) = %x, %v; want empty and no error", code, err)
+	}
+
+	ret, err := c.CallContract(ctx, ethereum.CallMsg{To: &contract, Data: sel}, nil)
+	if err != nil || len(ret) != 1 {
+		t.Errorf("CallContract = %x, %v", ret, err)
+	}
+
+	// A selector the contract does not answer to reverts, as it would on a
+	// real node.
+	if _, err := c.CallContract(ctx, ethereum.CallMsg{To: &contract, Data: []byte{0x00}}, nil); !errors.Is(err, ErrReverted) {
+		t.Errorf("unscripted selector = %v, want ErrReverted", err)
+	}
+	if _, err := c.CallContract(ctx, ethereum.CallMsg{}, nil); !errors.Is(err, ErrReverted) {
+		t.Errorf("call with no To = %v, want ErrReverted", err)
+	}
+}
+
+func TestCodeAndCallFailuresSurface(t *testing.T) {
+	ctx := context.Background()
+	addr := common.HexToAddress("0xc0de")
+	sel := []byte{0x01, 0x02, 0x03, 0x04}
+
+	c := &Client{}
+	c.FailCode(addr, errBoom)
+	c.FailCall(addr, sel, errBoom)
+
+	if _, err := c.CodeAt(ctx, addr, nil); !errors.Is(err, errBoom) {
+		t.Errorf("CodeAt error = %v, want errBoom", err)
+	}
+	if _, err := c.CallContract(ctx, ethereum.CallMsg{To: &addr, Data: sel}, nil); !errors.Is(err, errBoom) {
+		t.Errorf("CallContract error = %v, want errBoom", err)
+	}
+}

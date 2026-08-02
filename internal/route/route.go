@@ -1,16 +1,18 @@
-// Package route maps a (source, destination) chain pair onto the kind of
-// operation the bridge has to perform.
+// Package route decides what kind of operation a (source, destination) chain
+// pair calls for, by asking the chains rather than by consulting a list.
 //
-// Keeping this decision in one place means the CLI, the bridge and the tests
-// all agree on what a pair of chain IDs means, and that an unsupported pair is
-// rejected once rather than discovered halfway through a send.
+// Keeping the decision in one place means the CLI, the bridge and the tests all
+// agree on what a pair of chains means, and that a pair the bridge cannot serve
+// is rejected once, with a reason, rather than discovered halfway through a
+// send.
 package route
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
-	"github.com/pigfox/eth-bridge-go/internal/config"
+	"github.com/pigfox/eth-bridge-go/internal/opstack"
 )
 
 // Kind is the operation a route resolves to.
@@ -43,26 +45,71 @@ func (k Kind) String() string {
 	}
 }
 
-// ErrUnsupportedRoute is returned for a chain pair the bridge does not handle.
+// ErrUnsupportedRoute is returned for a chain pair the bridge cannot serve.
 var ErrUnsupportedRoute = errors.New("unsupported route")
 
-// ErrNotImplemented is returned for a route that is recognised but whose
-// implementation has not shipped yet.
-var ErrNotImplemented = errors.New("route is recognised but not implemented in this version")
+// Endpoint is one side of a route: a chain ID, and a read-only way to ask that
+// chain what it is. It is an interface rather than a client so that resolving a
+// route can be tested without a node.
+type Endpoint = opstack.Endpoint
 
-// Resolve maps a source and destination chain ID onto a Kind.
-func Resolve(src, dst uint64) (Kind, error) {
+// Route is a resolved operation, together with the contract addresses it needs.
+type Route struct {
+	// Kind is the operation to perform.
+	Kind Kind
+	// Addrs are the Standard Bridge contracts for the pair. They are set only
+	// for the two bridge routes; a same-chain transfer uses no contract.
+	Addrs opstack.Addresses
+}
+
+// Resolve decides what the configured pair of chains means.
+//
+// The decision is a capability check, not a table lookup. A same-chain transfer
+// is always possible. Otherwise each side is asked whether it is an OP Stack
+// L2, and the one that is gets paired against the one that is not — which is
+// also where the contract addresses come from. Everything else is refused with
+// the reason it failed.
+func Resolve(ctx context.Context, src, dst Endpoint) (Route, error) {
+	if src.ChainID == dst.ChainID {
+		return Route{Kind: KindSameChain}, nil
+	}
+
+	srcIsL2, err := opstack.IsOPStack(ctx, src)
+	if err != nil {
+		return Route{}, err
+	}
+	dstIsL2, err := opstack.IsOPStack(ctx, dst)
+	if err != nil {
+		return Route{}, err
+	}
+
 	switch {
-	case src == config.ChainIDEthSepolia && dst == config.ChainIDBaseSepolia:
-		return KindDeposit, nil
-	case src == config.ChainIDBaseSepolia && dst == config.ChainIDEthSepolia:
-		return KindWithdrawInitiate, nil
-	case src == dst:
-		// A same-chain transfer depends on no bridge contract and no pairing,
-		// so there is nothing to check beyond the endpoint serving the chain it
-		// claims to, which the bridge verifies before it signs.
-		return KindSameChain, nil
+	case srcIsL2 && dstIsL2:
+		return Route{}, fmt.Errorf("%w: %d -> %d: both chains are OP Stack L2s. "+
+			"The Standard Bridge settles only through the L1 they share, so it cannot move value "+
+			"directly between two rollups; that needs a third-party message protocol, which this tool does not implement",
+			ErrUnsupportedRoute, src.ChainID, dst.ChainID)
+
+	case dstIsL2:
+		// The destination is the rollup, so value is going down: a deposit.
+		addrs, err := opstack.DiscoverCached(ctx, src, dst)
+		if err != nil {
+			return Route{}, err
+		}
+		return Route{Kind: KindDeposit, Addrs: addrs}, nil
+
+	case srcIsL2:
+		// The source is the rollup, so value is coming up: a withdrawal, of
+		// which this tool performs only the first leg.
+		addrs, err := opstack.DiscoverCached(ctx, dst, src)
+		if err != nil {
+			return Route{}, err
+		}
+		return Route{Kind: KindWithdrawInitiate, Addrs: addrs}, nil
+
 	default:
-		return KindUnknown, fmt.Errorf("%w: %d -> %d", ErrUnsupportedRoute, src, dst)
+		return Route{}, fmt.Errorf("%w: %d -> %d: neither chain is an OP Stack L2 "+
+			"(neither carries code at the standard bridge predeploy %s), so there is no bridge between them to use",
+			ErrUnsupportedRoute, src.ChainID, dst.ChainID, opstack.L2StandardBridgePredeploy.Hex())
 	}
 }

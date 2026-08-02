@@ -68,6 +68,103 @@ type Client struct {
 	sent     []*types.Transaction
 	estimate []ethereum.CallMsg
 	closed   bool
+
+	// CodeAt and CallContract are keyed by what they read rather than queued
+	// by when they are called. They model chain state, not a sequence of
+	// events, so a test that scripts them should not also have to know the
+	// order the code under test happens to read them in.
+	//
+	// An unscripted address is therefore not an error: CodeAt reports no code,
+	// which is what a node says about an account holding no contract, and
+	// CallContract reports a revert, which is what a node says about calling a
+	// function a contract does not have. Both are states discovery has to
+	// handle, so they must be reachable without scripting.
+	code  map[common.Address]outcome[[]byte]
+	calls map[callKey]outcome[[]byte]
+}
+
+// callKey identifies one read-only call: the contract and the four-byte
+// selector it was asked for.
+type callKey struct {
+	to  common.Address
+	sel [4]byte
+}
+
+// ErrReverted is what CallContract returns for an address and selector the test
+// did not script, standing in for a node's execution-reverted error.
+var ErrReverted = errors.New("fake: execution reverted")
+
+// SetCode makes CodeAt report code at addr.
+func (c *Client) SetCode(addr common.Address, code []byte) *Client {
+	return c.setCode(addr, outcome[[]byte]{val: code})
+}
+
+// FailCode makes CodeAt fail for addr.
+func (c *Client) FailCode(addr common.Address, err error) *Client {
+	return c.setCode(addr, outcome[[]byte]{err: err})
+}
+
+// setCode records one CodeAt outcome.
+func (c *Client) setCode(addr common.Address, o outcome[[]byte]) *Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.code == nil {
+		c.code = map[common.Address]outcome[[]byte]{}
+	}
+	c.code[addr] = o
+	return c
+}
+
+// SetCall makes CallContract return ret for a call to addr with the given
+// four-byte selector.
+func (c *Client) SetCall(addr common.Address, selector []byte, ret []byte) *Client {
+	return c.setCall(addr, selector, outcome[[]byte]{val: ret})
+}
+
+// FailCall makes CallContract fail for a call to addr with the given selector.
+func (c *Client) FailCall(addr common.Address, selector []byte, err error) *Client {
+	return c.setCall(addr, selector, outcome[[]byte]{err: err})
+}
+
+// setCall records one CallContract outcome.
+func (c *Client) setCall(addr common.Address, selector []byte, o outcome[[]byte]) *Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.calls == nil {
+		c.calls = map[callKey]outcome[[]byte]{}
+	}
+	c.calls[key(addr, selector)] = o
+	return c
+}
+
+// key builds the lookup key for a call, tolerating a selector of any length so
+// that a test can pass calldata straight through.
+func key(addr common.Address, selector []byte) callKey {
+	k := callKey{to: addr}
+	copy(k.sel[:], selector)
+	return k
+}
+
+// CodeAt implements chain.Client.
+func (c *Client) CodeAt(_ context.Context, account common.Address, _ *big.Int) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	o := c.code[account]
+	return o.val, o.err
+}
+
+// CallContract implements chain.Client.
+func (c *Client) CallContract(_ context.Context, call ethereum.CallMsg, _ *big.Int) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if call.To == nil {
+		return nil, ErrReverted
+	}
+	o, ok := c.calls[key(*call.To, call.Data)]
+	if !ok {
+		return nil, ErrReverted
+	}
+	return o.val, o.err
 }
 
 // PushChainID scripts one ChainID result.

@@ -11,33 +11,19 @@ const (
 	ChainIDBaseSepolia uint64 = 84532
 )
 
-// Base Sepolia bridge contracts.
-//
-// Verified against docs.base.org and against the chain itself before the first
-// live deposit: the L1 bridge reports version 2.8.0 and an OTHER_BRIDGE of
-// 0x4200000000000000000000000000000000000010, which is the L2 standard bridge
-// predeploy below.
-const (
-	// L1StandardBridgeSepolia is the Base Sepolia standard bridge, deployed on
-	// Ethereum Sepolia.
-	L1StandardBridgeSepolia = "0xfd0Bf71F60660E2f608ed56e1659C450eB113120"
-	// OptimismPortalSepolia emits the TransactionDeposited event from which the
-	// resulting L2 transaction hash is derived.
-	OptimismPortalSepolia = "0x49f53e41452C74589E85cA1677426Ba426459e85"
-	// L2StandardBridgePredeploy is the L2 side of the standard bridge.
-	L2StandardBridgePredeploy = "0x4200000000000000000000000000000000000010"
-	// L2ToL1MessagePasserPredeploy emits the MessagePassed event that carries
-	// the parameters a withdrawal is later proved with.
-	L2ToL1MessagePasserPredeploy = "0x4200000000000000000000000000000000000016"
-)
-
 // LegacyERC20ETH is the sentinel token address that means "ETH" to
 // L2StandardBridge.withdrawTo.
 //
+// This is one of the two addresses in this tool that are hard-coded and stay
+// that way, because it is a fact about the protocol rather than about any one
+// deployment of it. The other, the predeploy layout, lives in internal/opstack.
+// Every address that identifies a particular chain's bridge is discovered at
+// runtime instead.
+//
 // This is Predeploys.LEGACY_ERC20_ETH. The other sentinel in circulation,
-// 0xEeee...EEeE (Constants.ETHER), is *not* accepted by the bridge deployed on
-// Base Sepolia: an eth_call with it reverts, while this address succeeds. The
-// deployed L2StandardBridge reports version 1.3.0.
+// 0xEeee...EEeE (Constants.ETHER), is *not* accepted by the L2StandardBridge
+// deployed on Base Sepolia: an eth_call with it reverts, while this address
+// succeeds. The deployed bridge there reports version 1.3.0.
 const LegacyERC20ETH = "0xDeadDeAddeAddEAddeadDEaDDEAdDeaDDeAD0000"
 
 // DefaultWithdrawMinGasLimit is the gas reserved for the withdrawal's eventual
