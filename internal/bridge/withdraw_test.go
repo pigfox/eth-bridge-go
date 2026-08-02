@@ -33,8 +33,8 @@ func withdrawCfg(t *testing.T) config.Config {
 			config.EnvDestAddr:      destAddr,
 			config.EnvSourceChainID: "84532",
 			config.EnvDestChainID:   "11155111",
-			config.EnvL1RPCURL:      "https://eth-sepolia.example",
-			config.EnvL2RPCURL:      "https://base-sepolia.example",
+			config.EnvDestRPCURL:    "https://eth-sepolia.example",
+			config.EnvSourceRPCURL:  "https://base-sepolia.example",
 		}[k]
 	})
 	if err != nil {

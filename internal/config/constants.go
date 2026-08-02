@@ -81,8 +81,12 @@ const (
 	EnvDestAddr      = "BRIDGE_DEST_ADDR"
 	EnvSourceChainID = "BRIDGE_SOURCE_CHAIN_ID"
 	EnvDestChainID   = "BRIDGE_DEST_CHAIN_ID"
-	EnvL1RPCURL      = "BRIDGE_L1_RPC_URL"
-	EnvL2RPCURL      = "BRIDGE_L2_RPC_URL"
+	// EnvSourceRPCURL and EnvDestRPCURL are named for the part each endpoint
+	// plays in the transfer, not for its layer. Which side of a bridge route is
+	// the L1 and which is the rollup is discovered from the chains themselves,
+	// so it cannot be a precondition of reading the configuration.
+	EnvSourceRPCURL = "BRIDGE_SOURCE_RPC_URL"
+	EnvDestRPCURL   = "BRIDGE_DEST_RPC_URL"
 	// EnvWithdrawalsDir is optional and defaults to DefaultWithdrawalsDir.
 	EnvWithdrawalsDir = "BRIDGE_WITHDRAWALS_DIR"
 )

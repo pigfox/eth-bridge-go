@@ -38,7 +38,7 @@ func baseEnv() map[string]string {
 		config.EnvDestAddr:      destAddr,
 		config.EnvSourceChainID: "84532",
 		config.EnvDestChainID:   "84532",
-		config.EnvL2RPCURL:      "https://base-sepolia.example",
+		config.EnvSourceRPCURL:  "https://base-sepolia.example",
 	}
 }
 
@@ -224,8 +224,8 @@ func TestDispatchWithdrawalDialFailure(t *testing.T) {
 	cfg := config.Config{
 		SourceChainID: config.ChainIDBaseSepolia,
 		DestChainID:   config.ChainIDEthSepolia,
-		L1RPCURL:      "l1",
-		L2RPCURL:      "l2",
+		SourceRPCURL:  "l1",
+		DestRPCURL:    "l2",
 	}
 	if _, err := dispatch(context.Background(), cfg, big.NewInt(1)); !errors.Is(err, errBoom) {
 		t.Fatalf("error = %v, want errBoom", err)
@@ -320,7 +320,8 @@ func TestTestAddrMatchesTestPK(t *testing.T) {
 func depositEnv() map[string]string {
 	m := baseEnv()
 	m[config.EnvSourceChainID] = "11155111"
-	m[config.EnvL1RPCURL] = "https://eth-sepolia.example"
+	m[config.EnvSourceRPCURL] = "https://eth-sepolia.example"
+	m[config.EnvDestRPCURL] = "https://base-sepolia.example"
 	return m
 }
 
@@ -436,8 +437,8 @@ func TestDispatchDepositDialFailures(t *testing.T) {
 	cfg := config.Config{
 		SourceChainID: config.ChainIDEthSepolia,
 		DestChainID:   config.ChainIDBaseSepolia,
-		L1RPCURL:      "l1",
-		L2RPCURL:      "l2",
+		SourceRPCURL:  "l1",
+		DestRPCURL:    "l2",
 	}
 
 	tests := []struct {
@@ -476,7 +477,7 @@ func TestReportIsSilentWithoutATransaction(t *testing.T) {
 func withdrawEnv() map[string]string {
 	m := baseEnv()
 	m[config.EnvDestChainID] = "11155111"
-	m[config.EnvL1RPCURL] = "https://eth-sepolia.example"
+	m[config.EnvDestRPCURL] = "https://eth-sepolia.example"
 	return m
 }
 

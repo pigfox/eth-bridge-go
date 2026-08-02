@@ -57,7 +57,10 @@ func Resolve(src, dst uint64) (Kind, error) {
 		return KindDeposit, nil
 	case src == config.ChainIDBaseSepolia && dst == config.ChainIDEthSepolia:
 		return KindWithdrawInitiate, nil
-	case src == dst && config.SupportedChainID(src):
+	case src == dst:
+		// A same-chain transfer depends on no bridge contract and no pairing,
+		// so there is nothing to check beyond the endpoint serving the chain it
+		// claims to, which the bridge verifies before it signs.
 		return KindSameChain, nil
 	default:
 		return KindUnknown, fmt.Errorf("%w: %d -> %d", ErrUnsupportedRoute, src, dst)

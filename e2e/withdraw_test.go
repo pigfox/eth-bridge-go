@@ -31,7 +31,7 @@ var withdrawAmount = big.NewInt(10_000_000_000_000) // 0.00001 ETH
 func TestT4WithdrawInitiateBaseSepoliaToEthSepolia(t *testing.T) {
 	requireEnv(t,
 		config.EnvSourceAddr, config.EnvSourcePK, config.EnvDestAddr,
-		config.EnvL2RPCURL,
+		envBaseSepoliaRPC,
 	)
 
 	dir := t.TempDir()
@@ -41,10 +41,12 @@ func TestT4WithdrawInitiateBaseSepoliaToEthSepolia(t *testing.T) {
 			return strconvUint(config.ChainIDBaseSepolia)
 		case config.EnvDestChainID:
 			return strconvUint(config.ChainIDEthSepolia)
-		case config.EnvL1RPCURL:
-			// A withdrawal only touches L2, but config demands an endpoint for
-			// every chain the route names.
-			if v := os.Getenv(k); v != "" {
+		case config.EnvSourceRPCURL:
+			return os.Getenv(envBaseSepoliaRPC)
+		case config.EnvDestRPCURL:
+			// Initiating a withdrawal only touches L2, but config demands an
+			// endpoint for every chain the route names.
+			if v := os.Getenv(envEthSepoliaRPC); v != "" {
 				return v
 			}
 			return "https://ethereum-sepolia-rpc.publicnode.com"

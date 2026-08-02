@@ -34,8 +34,8 @@ func depositCfg(t *testing.T) config.Config {
 			config.EnvDestAddr:      destAddr,
 			config.EnvSourceChainID: "11155111",
 			config.EnvDestChainID:   "84532",
-			config.EnvL1RPCURL:      "https://eth-sepolia.example",
-			config.EnvL2RPCURL:      "https://base-sepolia.example",
+			config.EnvSourceRPCURL:  "https://eth-sepolia.example",
+			config.EnvDestRPCURL:    "https://base-sepolia.example",
 		}[k]
 	})
 	if err != nil {

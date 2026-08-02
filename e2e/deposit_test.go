@@ -29,7 +29,7 @@ var depositAmount = big.NewInt(500_000_000_000_000) // 0.0005 ETH
 func TestT3DepositEthSepoliaToBaseSepolia(t *testing.T) {
 	requireEnv(t,
 		config.EnvSourceAddr, config.EnvSourcePK, config.EnvDestAddr,
-		config.EnvL1RPCURL, config.EnvL2RPCURL,
+		envEthSepoliaRPC, envBaseSepoliaRPC,
 	)
 
 	cfg, err := config.Load(func(k string) string {
@@ -38,6 +38,10 @@ func TestT3DepositEthSepoliaToBaseSepolia(t *testing.T) {
 			return strconvUint(config.ChainIDEthSepolia)
 		case config.EnvDestChainID:
 			return strconvUint(config.ChainIDBaseSepolia)
+		case config.EnvSourceRPCURL:
+			return os.Getenv(envEthSepoliaRPC)
+		case config.EnvDestRPCURL:
+			return os.Getenv(envBaseSepoliaRPC)
 		default:
 			return os.Getenv(k)
 		}

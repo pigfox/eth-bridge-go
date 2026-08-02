@@ -47,7 +47,7 @@ var (
 	dial   = chain.Dial
 )
 
-const usage = `bridge — move testnet ETH between Ethereum Sepolia and Base Sepolia.
+const usage = `bridge — move ETH within one EVM chain, or between an L1 and an OP Stack L2.
 
 usage:
   bridge send --amount <eth>   send the configured route
@@ -57,10 +57,12 @@ configuration is read from the environment:
   BRIDGE_SOURCE_ADDR       funding account
   BRIDGE_SOURCE_PK         its private key (must derive to BRIDGE_SOURCE_ADDR)
   BRIDGE_DEST_ADDR         recipient on the destination chain
-  BRIDGE_SOURCE_CHAIN_ID   11155111 (Eth Sepolia) or 84532 (Base Sepolia)
-  BRIDGE_DEST_CHAIN_ID     11155111 (Eth Sepolia) or 84532 (Base Sepolia)
-  BRIDGE_L1_RPC_URL        Ethereum Sepolia endpoint, if the route touches L1
-  BRIDGE_L2_RPC_URL        Base Sepolia endpoint, if the route touches L2
+  BRIDGE_SOURCE_CHAIN_ID   chain to send from
+  BRIDGE_DEST_CHAIN_ID     chain to send to; equal to the source for a
+                           plain transfer
+  BRIDGE_SOURCE_RPC_URL    endpoint for the source chain
+  BRIDGE_DEST_RPC_URL      endpoint for the destination chain, required
+                           only when the two chains differ
   BRIDGE_WITHDRAWALS_DIR   where to record initiated withdrawals
                            (optional, defaults to ./withdrawals)
 `

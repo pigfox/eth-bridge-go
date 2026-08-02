@@ -42,7 +42,7 @@ func testCfg(t *testing.T) config.Config {
 			config.EnvDestAddr:      destAddr,
 			config.EnvSourceChainID: "84532",
 			config.EnvDestChainID:   "84532",
-			config.EnvL2RPCURL:      "https://base-sepolia.example",
+			config.EnvSourceRPCURL:  "https://base-sepolia.example",
 		}[k]
 	})
 	if err != nil {

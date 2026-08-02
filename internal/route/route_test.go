@@ -23,6 +23,13 @@ func TestResolve(t *testing.T) {
 		{"base to eth initiates a withdrawal", base, eth, KindWithdrawInitiate},
 		{"eth to eth is same-chain", eth, eth, KindSameChain},
 		{"base to base is same-chain", base, base, KindSameChain},
+		// Same-chain needs no bridge contract, so it is not restricted to the
+		// chains this tool knows how to bridge between.
+		{"mainnet to mainnet is same-chain", 1, 1, KindSameChain},
+		{"optimism to optimism is same-chain", 10, 10, KindSameChain},
+		{"polygon to polygon is same-chain", 137, 137, KindSameChain},
+		{"arbitrum to arbitrum is same-chain", 42161, 42161, KindSameChain},
+		{"a local devnet is same-chain", 31337, 31337, KindSameChain},
 	}
 
 	for _, tc := range tests {
@@ -45,9 +52,7 @@ func TestResolveUnsupported(t *testing.T) {
 	}{
 		{"mainnet to base sepolia", 1, config.ChainIDBaseSepolia},
 		{"base sepolia to mainnet", config.ChainIDBaseSepolia, 1},
-		// Equal but unsupported must not slip through the same-chain arm.
-		{"same unsupported chain", 1, 1},
-		{"two zeroes", 0, 0},
+		{"two unrelated chains", 137, 42161},
 	}
 
 	for _, tc := range tests {

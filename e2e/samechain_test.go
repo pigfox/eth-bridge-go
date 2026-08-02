@@ -31,6 +31,15 @@ const (
 	pollInteval = 5 * time.Second
 )
 
+// The live harness exports one endpoint per network, because a single exported
+// environment has to drive tests that run in both directions. The tool itself
+// takes a source and a destination endpoint and has no opinion about which
+// network is which, so the mapping lives here rather than in the library.
+const (
+	envEthSepoliaRPC  = "BRIDGE_L1_RPC_URL"
+	envBaseSepoliaRPC = "BRIDGE_L2_RPC_URL"
+)
+
 // T1: a same-chain transfer on Base Sepolia.
 func TestT1SameChainBaseSepolia(t *testing.T) {
 	runSameChain(t, config.ChainIDBaseSepolia, "Base Sepolia", "https://sepolia.basescan.org/tx/")
@@ -46,18 +55,20 @@ func TestT2SameChainEthSepolia(t *testing.T) {
 func runSameChain(t *testing.T, chainID uint64, network, explorer string) {
 	t.Helper()
 
-	rpcVar := config.EnvL1RPCURL
+	rpcVar := envEthSepoliaRPC
 	if chainID == config.ChainIDBaseSepolia {
-		rpcVar = config.EnvL2RPCURL
+		rpcVar = envBaseSepoliaRPC
 	}
 	requireEnv(t, config.EnvSourceAddr, config.EnvSourcePK, config.EnvDestAddr, rpcVar)
 
-	// The chain IDs are supplied by the test rather than the environment, so
-	// that one exported environment drives both networks.
+	// The chain IDs and the endpoint are supplied by the test rather than the
+	// environment, so that one exported environment drives both networks.
 	cfg, err := config.Load(func(k string) string {
 		switch k {
 		case config.EnvSourceChainID, config.EnvDestChainID:
 			return strconvUint(chainID)
+		case config.EnvSourceRPCURL:
+			return os.Getenv(rpcVar)
 		default:
 			return os.Getenv(k)
 		}
