@@ -209,11 +209,11 @@ func TestUnwrapOpaqueData(t *testing.T) {
 		{
 			// A declared length that no amount of data could satisfy.
 			name: "declared length does not fit an int64",
-			data: append(bytes.Repeat([]byte{0x00}, 32), bytes.Repeat([]byte{0xff}, 32)...),
+			data: append(make([]byte, 32), bytes.Repeat([]byte{0xff}, 32)...),
 		},
 		{
 			name: "declared length exceeds the bytes present",
-			data: append(append(bytes.Repeat([]byte{0x00}, 32),
+			data: append(append(make([]byte, 32),
 				common.LeftPadBytes(big.NewInt(500).Bytes(), 32)...), make([]byte, 32)...),
 		},
 	}

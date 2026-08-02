@@ -92,7 +92,7 @@ func all(src string) Sources {
 }
 
 // Options tunes how the addresses for a bridge route are resolved. The zero
-// value is discovery only, which is the behaviour that needs no configuration.
+// value is discovery only, which is the behavior that needs no configuration.
 type Options struct {
 	// Overrides are addresses supplied by the operator. Any non-zero field
 	// wins over everything else, and a complete set skips the chain entirely.

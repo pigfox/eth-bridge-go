@@ -33,7 +33,7 @@ const (
 
 // weiPerEth is 1e18 as a big.Float, for the ETH-to-wei conversion.
 var weiPerEth = new(big.Float).SetPrec(amountPrec).SetInt(
-	new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil),
+	new(big.Int).Exp(big.NewInt(10), big.NewInt(weiDecimals), nil),
 )
 
 // amountPrec is the mantissa precision used for amount arithmetic. Enough bits
@@ -74,31 +74,41 @@ and are a last resort rather than a normal setting:
   BRIDGE_OPTIMISM_PORTAL_ADDRESS
 `
 
+// out writes a formatted line to w. A command cannot report a failure to write
+// to its own output stream — the stream it would report on is the one that just
+// failed — so the write error is read here and deliberately dropped, once,
+// instead of being ignored at every call site.
+func out(w io.Writer, format string, a ...any) {
+	if _, err := fmt.Fprintf(w, format, a...); err != nil {
+		return
+	}
+}
+
 // run is the whole command. It returns the process exit code.
-func run(args []string, stdout, stderr io.Writer) int {
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprint(stderr, usage)
+		out(stderr, "%s", usage)
 		return exitUsage
 	}
 
 	switch args[0] {
 	case "version":
-		fmt.Fprintln(stdout, version)
+		out(stdout, "%s\n", version)
 		return exitOK
 	case "send":
-		return runSend(args[1:], stdout, stderr)
+		return runSend(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
-		fmt.Fprint(stdout, usage)
+		out(stdout, "%s", usage)
 		return exitOK
 	default:
-		fmt.Fprintf(stderr, "unknown subcommand %q\n\n", args[0])
-		fmt.Fprint(stderr, usage)
+		out(stderr, "unknown subcommand %q\n\n", args[0])
+		out(stderr, "%s", usage)
 		return exitUsage
 	}
 }
 
 // runSend parses the send flags and performs the configured route.
-func runSend(args []string, stdout, stderr io.Writer) int {
+func runSend(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	amountFlag := fs.String("amount", "", "amount to send, in ETH (for example 0.001)")
@@ -106,28 +116,28 @@ func runSend(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if *amountFlag == "" {
-		fmt.Fprintln(stderr, "send: --amount is required")
+		out(stderr, "%s\n", "send: --amount is required")
 		return exitUsage
 	}
 	amount, err := parseEther(*amountFlag)
 	if err != nil {
-		fmt.Fprintf(stderr, "send: %v\n", err)
+		out(stderr, "send: %v\n", err)
 		return exitUsage
 	}
 
 	cfg, err := config.Load(getenv)
 	if err != nil {
-		fmt.Fprintf(stderr, "send: %v\n", err)
+		out(stderr, "send: %v\n", err)
 		return exitUsage
 	}
 
-	res, err := dispatch(context.Background(), cfg, amount, stdout)
+	res, err := dispatch(ctx, cfg, amount, stdout)
 	// A deposit that reached L1 reports its hashes even when the L2 credit did
 	// not arrive in time, because those hashes are how the operator finds out
 	// what happened.
 	report(stdout, cfg, res)
 	if err != nil {
-		fmt.Fprintf(stderr, "send: %v\n", err)
+		out(stderr, "send: %v\n", err)
 		return exitRuntime
 	}
 	return exitOK
@@ -138,26 +148,26 @@ func report(stdout io.Writer, cfg config.Config, res bridge.Result) {
 	if res.SrcTxHash == (common.Hash{}) {
 		return
 	}
-	fmt.Fprintf(stdout, "route:  %s\n", res.Kind)
-	fmt.Fprintf(stdout, "amount: %s wei\n", res.Amount)
-	fmt.Fprintf(stdout, "src tx: %s\n", res.SrcTxHash.Hex())
-	fmt.Fprintf(stdout, "        %s\n", explorerURL(cfg.SourceChainID, res.SrcTxHash.Hex()))
+	out(stdout, "route:  %s\n", res.Kind)
+	out(stdout, "amount: %s wei\n", res.Amount)
+	out(stdout, "src tx: %s\n", res.SrcTxHash.Hex())
+	out(stdout, "        %s\n", explorerURL(cfg.SourceChainID, res.SrcTxHash.Hex()))
 	if res.DstTxHash != (common.Hash{}) {
-		fmt.Fprintf(stdout, "dst tx: %s\n", res.DstTxHash.Hex())
-		fmt.Fprintf(stdout, "        %s\n", explorerURL(cfg.DestChainID, res.DstTxHash.Hex()))
+		out(stdout, "dst tx: %s\n", res.DstTxHash.Hex())
+		out(stdout, "        %s\n", explorerURL(cfg.DestChainID, res.DstTxHash.Hex()))
 	}
 	if res.Credited != nil {
-		fmt.Fprintf(stdout, "credit: %s wei on chain %d\n", res.Credited, cfg.DestChainID)
+		out(stdout, "credit: %s wei on chain %d\n", res.Credited, cfg.DestChainID)
 	}
 	if res.Withdrawal != nil {
-		fmt.Fprintf(stdout, "hash:   %s\n", res.Withdrawal.WithdrawalHash.Hex())
-		fmt.Fprintf(stdout, "block:  %s\n", res.Withdrawal.L2BlockNumber)
+		out(stdout, "hash:   %s\n", res.Withdrawal.WithdrawalHash.Hex())
+		out(stdout, "block:  %s\n", res.Withdrawal.L2BlockNumber)
 	}
 	if res.WithdrawalPath != "" {
-		fmt.Fprintf(stdout, "saved:  %s\n", res.WithdrawalPath)
+		out(stdout, "saved:  %s\n", res.WithdrawalPath)
 	}
 	if res.Kind == route.KindWithdrawInitiate {
-		fmt.Fprint(stdout, withdrawalNotice)
+		out(stdout, "%s", withdrawalNotice)
 	}
 }
 
@@ -207,7 +217,7 @@ func dispatch(ctx context.Context, cfg config.Config, amount *big.Int, stdout io
 			bridge.WithL1StandardBridge(rt.Addrs.L1StandardBridge),
 		).Deposit(ctx, amount)
 	default:
-		// Resolve returns an error for anything it does not recognise, and that
+		// Resolve returns an error for anything it does not recognize, and that
 		// error was handled above. The only kind left here is
 		// withdraw-initiate, so this arm is it rather than a dead fallback.
 		return bridge.New(cfg, src, dst,
@@ -220,7 +230,7 @@ func dispatch(ctx context.Context, cfg config.Config, amount *big.Int, stdout io
 // dialRoute opens both sides of the configured route.
 //
 // A same-chain transfer has one endpoint standing in for both, so it opens one
-// connection and hands it back twice rather than dialling the same node again.
+// connection and hands it back twice rather than dialing the same node again.
 // Closing it twice is harmless.
 func dialRoute(ctx context.Context, cfg config.Config) (src, dst chain.Client, err error) {
 	src, err = dialChain(ctx, cfg, cfg.SourceChainID)
@@ -295,9 +305,9 @@ func reportAddresses(stdout io.Writer, rt route.Route) {
 	if rt.Kind != route.KindDeposit && rt.Kind != route.KindWithdrawInitiate {
 		return
 	}
-	fmt.Fprintf(stdout, "l1 bridge:  %s (%s)\n", rt.Addrs.L1StandardBridge.Hex(), rt.Sources.L1StandardBridge)
-	fmt.Fprintf(stdout, "l2 bridge:  %s (%s)\n", rt.Addrs.L2StandardBridge.Hex(), rt.Sources.L2StandardBridge)
-	fmt.Fprintf(stdout, "portal:     %s (%s)\n", rt.Addrs.OptimismPortal.Hex(), rt.Sources.OptimismPortal)
+	out(stdout, "l1 bridge:  %s (%s)\n", rt.Addrs.L1StandardBridge.Hex(), rt.Sources.L1StandardBridge)
+	out(stdout, "l2 bridge:  %s (%s)\n", rt.Addrs.L2StandardBridge.Hex(), rt.Sources.L2StandardBridge)
+	out(stdout, "portal:     %s (%s)\n", rt.Addrs.OptimismPortal.Hex(), rt.Sources.OptimismPortal)
 }
 
 // explorerURL returns a block explorer link for a transaction hash, or the bare

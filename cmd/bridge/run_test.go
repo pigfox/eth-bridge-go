@@ -109,7 +109,7 @@ func minedClient() *fake.Client {
 // exec runs the command and returns its exit code and streams.
 func exec(args ...string) (int, string, string) {
 	var stdout, stderr bytes.Buffer
-	code := run(args, &stdout, &stderr)
+	code := run(context.Background(), args, &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
 }
 
@@ -165,9 +165,9 @@ func TestSendSuccess(t *testing.T) {
 	withEnv(t, baseEnv())
 	c := minedClient()
 
-	var dialled string
+	var dialed string
 	withDial(t, func(_ context.Context, rpc string) (chain.Client, error) {
-		dialled = rpc
+		dialed = rpc
 		return c, nil
 	})
 
@@ -175,8 +175,8 @@ func TestSendSuccess(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("exit code = %d (stderr: %s)", code, stderr)
 	}
-	if dialled != "https://base-sepolia.example" {
-		t.Errorf("dialled %q, want the configured L2 endpoint", dialled)
+	if dialed != "https://base-sepolia.example" {
+		t.Errorf("dialed %q, want the configured L2 endpoint", dialed)
 	}
 	for _, want := range []string{"route:  same-chain", "1000000000000000 wei", "src tx: 0x", "https://sepolia.basescan.org/tx/0x"} {
 		if !strings.Contains(stdout, want) {
@@ -208,7 +208,7 @@ func TestSendFlagErrors(t *testing.T) {
 			// touched.
 			withEnv(t, map[string]string{})
 			withDial(t, func(context.Context, string) (chain.Client, error) {
-				t.Error("dialled a node for a bad flag")
+				t.Error("dialed a node for a bad flag")
 				return nil, errBoom
 			})
 
@@ -281,7 +281,7 @@ func TestDispatchUnsupportedRoute(t *testing.T) {
 
 func TestDialChainRejectsAnUnconfiguredChain(t *testing.T) {
 	withDial(t, func(context.Context, string) (chain.Client, error) {
-		t.Error("dialled despite having no endpoint for the chain")
+		t.Error("dialed despite having no endpoint for the chain")
 		return nil, errBoom
 	})
 
@@ -593,5 +593,25 @@ func TestSendWithdrawalPrintsTheFinalizationNotice(t *testing.T) {
 	saved := filepath.Join(dir, c.Sent()[0].Hash().Hex()+".json")
 	if _, err := os.Stat(saved); err != nil {
 		t.Errorf("no record at %s: %v", saved, err)
+	}
+}
+
+// failingWriter reports an error on every write, standing in for a closed pipe
+// or a full disk on the command's own output stream.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("stream closed")
+}
+
+// TestOutDropsWriteErrors pins the contract of out: a command whose output
+// stream has failed has nowhere left to report that, so out must swallow the
+// error rather than panic or propagate it. run must still return its normal
+// exit code when every write fails.
+func TestOutDropsWriteErrors(t *testing.T) {
+	out(failingWriter{}, "%s\n", "discarded")
+
+	if code := run(context.Background(), nil, failingWriter{}, failingWriter{}); code != exitUsage {
+		t.Errorf("run with a dead stderr: exit code = %d, want %d", code, exitUsage)
 	}
 }

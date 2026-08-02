@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math/big"
@@ -147,7 +148,7 @@ func TestWithdrawInitiateHappyPath(t *testing.T) {
 		t.Errorf("value = %s, want %s", tx.Value(), amount)
 	}
 	wantSelector := crypto.Keccak256([]byte("withdrawTo(address,address,uint256,uint32,bytes)"))[:4]
-	if got := tx.Data(); len(got) < 4 || string(got[:4]) != string(wantSelector) {
+	if got := tx.Data(); len(got) < 4 || !bytes.Equal(got[:4], wantSelector) {
 		t.Errorf("selector = %x, want %x", got[:4], wantSelector)
 	}
 	if got := common.BytesToAddress(tx.Data()[4+12 : 4+32]); got != common.HexToAddress(config.LegacyERC20ETH) {

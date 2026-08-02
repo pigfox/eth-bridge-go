@@ -164,8 +164,8 @@ func ParseDeposit(rcpt *types.Receipt) (Deposit, error) {
 		return Deposit{}, ErrNoDepositLog
 	}
 	// topics: [signature, from, to, version]
-	if len(entry.Topics) != 4 {
-		return Deposit{}, fmt.Errorf("%w: %d topics, want 4", ErrBadDepositLog, len(entry.Topics))
+	if len(entry.Topics) != depositLogTopics {
+		return Deposit{}, fmt.Errorf("%w: %d topics, want %d", ErrBadDepositLog, len(entry.Topics), depositLogTopics)
 	}
 
 	opaque, err := unwrapOpaqueData(entry.Data)
